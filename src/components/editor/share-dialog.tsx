@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import Link from "next/link";
 import { BookOpen, Bot, Check, ChevronRight, Copy, Folder, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -8,8 +9,10 @@ import { ApiError, api, apiErrorText, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
-import { markNotificationRead } from "@/lib/notifications-store";
+import { markNotificationReadConfirmed } from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
+import { shareReturnPath } from "@/lib/share-target";
+import { signOutSafely } from "@/lib/sign-out";
 
 type CollaboratorRole = Exclude<Role, "owner">;
 type LinkAccess = DocumentDto["linkAccess"];
@@ -83,26 +86,35 @@ function LinkRow({
   );
 }
 
-export const ShareDialog = memo(function ShareDialog({
-  open,
-  onOpenChange,
-  doc,
-  isOwner,
-  onDocChange,
-  onConnectAgent,
-  accessRequest,
-  onAccessRequestClosed,
-}: {
+type ShareDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
   isOwner: boolean;
+  signedIn?: boolean;
   onDocChange: (doc: DocumentDto) => void;
   /** Shows the "Connect an AI agent" row; called once Share has closed. */
   onConnectAgent?: () => void;
   accessRequest?: AccessRequest | null;
   onAccessRequestClosed?: () => void;
-}) {
+};
+
+export const ShareDialog = memo(function ShareDialog(props: ShareDialogProps) {
+  return <Dialog open={props.open} onOpenChange={props.onOpenChange}><ShareDialogContent {...props} /></Dialog>;
+});
+
+/** Reuse inside an existing Dialog so asynchronous metadata loading retains the original opener. */
+export const ShareDialogContent = memo(function ShareDialogContent({
+  open,
+  onOpenChange,
+  doc,
+  isOwner,
+  signedIn = true,
+  onDocChange,
+  onConnectAgent,
+  accessRequest,
+  onAccessRequestClosed,
+}: ShareDialogProps) {
   const [list, setList] = useState<ListState>({ status: "loading" });
   const [retry, setRetry] = useState(0);
   const [login, setLogin] = useState("");
@@ -308,7 +320,10 @@ export const ShareDialog = memo(function ShareDialog({
           }
         }
       }
-      if (accessRequest.notificationId) await markNotificationRead(accessRequest.notificationId);
+      if (accessRequest.notificationId && !(await markNotificationReadConfirmed(accessRequest.notificationId))) {
+        if (currentDoc.current === documentId) setRequestError("Could not mark this request as resolved. Check the access list before retrying.");
+        return;
+      }
       if (currentDoc.current === documentId) onOpenChange(false);
     } catch (e) {
       if (currentDoc.current === documentId) setRequestError(apiErrorText(e, "Could not mark this request as resolved."));
@@ -326,6 +341,11 @@ export const ShareDialog = memo(function ShareDialog({
   const requestName = accessRequest?.name?.trim();
   const requestLabel = requestName ? `${requestName} (@${requestLogin})` : `@${requestLogin}`;
   const validRequestLogin = Boolean(accessRequest && isValidLogin(requestLogin));
+  const requestSignInHref = `/login?next=${encodeURIComponent(shareReturnPath(`/d/${doc.id}`, {
+    share: "1",
+    accessRequest: accessRequest?.login,
+    notification: accessRequest?.notificationId ?? undefined,
+  }))}`;
   const excluded = [...(owner?.login ? [owner.login] : []), ...collaborators.map((c) => c.login)];
   // The role comes from the person's row when it is listed, so the sentence and the row below never disagree.
   const refusedRole = refused ? (collaborators.find((c) => c.login === refused.login)?.role ?? refused.role) : null;
@@ -340,10 +360,9 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={accessRequest ? "Access request" : `Share “${doc.title}”`}
-        description={accessRequest ? `${requestLabel} requested access to “${doc.title}”.` : "Add people by GitHub handle. They sign in with GitHub."}
+        title={accessRequest ? `Share document “${doc.title}”` : `Share “${doc.title}”`}
+        description={accessRequest ? `${requestLabel} requested access to this document.` : "Add people by GitHub handle. They sign in with GitHub."}
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
         closeButtonClassName="max-sm:min-h-11 max-sm:min-w-11"
         onClosed={() => {
@@ -355,10 +374,15 @@ export const ShareDialog = memo(function ShareDialog({
       >
         {accessRequest ? (
           <div className="flex flex-col gap-4" data-testid="access-request">
-            <p className="text-sm text-ink-2">Granting gives view access only.</p>
+            <p className="text-sm text-ink-2">Adds a View grant on this document only. Higher access from other grants is kept.</p>
             {!validRequestLogin && <div className={ERROR_CLASS} role="alert">This request does not include a valid GitHub handle.</div>}
             {requestError && <div className={ERROR_CLASS} role="alert" data-testid="access-request-error">{requestError}</div>}
-            {!isOwner && <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>}
+            {!isOwner && <div className="space-y-3">
+              <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>
+              {signedIn
+                ? <button type="button" className="btn btn-outline btn-sm" onClick={() => void signOutSafely(requestSignInHref)}>Switch account</button>
+                : <Link className="btn btn-outline btn-sm" href={requestSignInHref}>Sign in as owner</Link>}
+            </div>}
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               {isOwner ? (
                 <>
@@ -442,7 +466,9 @@ export const ShareDialog = memo(function ShareDialog({
             <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3 py-2.5 text-xs text-ink-3" data-testid="folder-inherited-access">
               <Folder size={14} className="mt-0.5 shrink-0 text-ink-2" aria-hidden="true" />
               <p>
-                People shared with <span className="font-medium text-ink-2">{folder.name}</span> also have access to this document. Manage folder access from its menu on the dashboard.
+                This document inherits access from folder <a className="font-medium text-accent underline" href={`/f/${folder.id}?share=1`}>{folder.name}</a>.
+                {folder.linkAccess !== "private" && <> Folder link access: {folder.linkAccess}. Signed-out visitors can only view.</>}
+                {" "}The highest applicable permission wins. Changing this document&apos;s grants does not reduce higher folder access.
               </p>
             </div>
           )}
@@ -631,6 +657,5 @@ export const ShareDialog = memo(function ShareDialog({
           </div>
         </div>}
       </DialogContent>
-    </Dialog>
   );
 });

@@ -21,6 +21,7 @@ const { createCollabServer, shutdownCollab, META_KEY, TEXT_KEY } = await import(
 const { attachCollab } = await import("@/server/collab/ws");
 const { registerCollab } = await import("@/server/collab/registry");
 const { createDocument, DOCUMENT_TITLE_MAX } = await import("@/server/documents");
+const { createFolder, moveDocumentsToFolder, setFolderLinkAccess } = await import("@/server/folders");
 const { readLiveDoc } = await import("@/server/livedoc");
 const { listActivity } = await import("@/server/activity");
 const { GET, PATCH } = await import("../app/api/documents/[id]/route");
@@ -121,6 +122,66 @@ describe("PATCH /api/documents/:id reaches the live document: { linkAccess } for
     await waitFor(() => provider.isSynced);
     return { ydoc, provider, socket, role, text: () => ydoc.getText(TEXT_KEY).toString() };
   }
+
+  it("re-resolves an explicit viewer when a stronger document link is enabled, then restores the direct role on revocation", async () => {
+    const doc = await createDocument({ ownerId: owner.id, content: "Strongest" });
+    const db = await getDb();
+    await db.insert(schema.collaborators).values({ documentId: doc.id, login: guest.login!, role: "viewer" });
+    const client = await open(guest, doc.id);
+    try {
+      expect(client.role).toBe("viewer");
+      expect((await as(owner, () => patch(doc.id, { linkAccess: "edit" }))).status).toBe(200);
+      await waitFor(() => !!hocuspocus.documents.get(doc.id)?.getConnections().some((connection) => connection.context.userId === guest.id && !connection.readOnly));
+      client.ydoc.getText(TEXT_KEY).insert(9, " link");
+      await waitFor(() => hocuspocus.documents.get(doc.id)?.getText(TEXT_KEY).toString() === "Strongest link");
+      expect((await as(owner, () => patch(doc.id, { linkAccess: "private" }))).status).toBe(200);
+      expect(hocuspocus.documents.get(doc.id)?.getConnections().find((connection) => connection.context.userId === guest.id)?.readOnly).toBe(true);
+      expect((await (await as(guest, () => get(doc.id))).json()).role).toBe("viewer");
+    } finally {
+      client.provider.destroy();
+      client.socket.destroy();
+    }
+  });
+
+  it("revokes folder-link visitors immediately while preserving direct access, and disconnects inherited editors on move-out", async () => {
+    const result = await createFolder(owner.id, "Live folder links");
+    if (result.outcome !== "ok") throw new Error("could not create fixture folder");
+    const folderId = result.folder.id;
+    const doc = await createDocument({ ownerId: owner.id, content: "Folder" });
+    await moveDocumentsToFolder([doc.id], folderId, owner.id);
+    await setFolderLinkAccess(folderId, owner.id, "edit");
+    const db = await getDb();
+    await db.insert(schema.collaborators).values({ documentId: doc.id, login: guest.login!, role: "viewer" });
+    const client = await open(guest, doc.id);
+    const anonymous = await open(null, doc.id);
+    try {
+      expect(client.role).toBe("editor");
+      expect(anonymous.role).toBe("viewer");
+      await setFolderLinkAccess(folderId, owner.id, "private");
+      expect(hocuspocus.documents.get(doc.id)?.getConnections().find((connection) => connection.context.userId === guest.id)?.readOnly).toBe(true);
+      await waitFor(() => !hocuspocus.documents.get(doc.id)?.getConnections().some((connection) => connection.context.userId.startsWith("anon-")));
+      expect((await as(null, () => get(doc.id))).status).toBe(401);
+      expect((await (await as(guest, () => get(doc.id))).json()).role).toBe("viewer");
+    } finally {
+      client.provider.destroy();
+      client.socket.destroy();
+      anonymous.provider.destroy();
+      anonymous.socket.destroy();
+    }
+    const inherited = await createDocument({ ownerId: owner.id, content: "Moved" });
+    await moveDocumentsToFolder([inherited.id], folderId, owner.id);
+    await setFolderLinkAccess(folderId, owner.id, "edit");
+    const visitor = await open(guest, inherited.id);
+    try {
+      expect(visitor.role).toBe("editor");
+      await moveDocumentsToFolder([inherited.id], null, owner.id);
+      await waitFor(() => !hocuspocus.documents.get(inherited.id)?.getConnections().some((connection) => connection.context.userId === guest.id));
+      expect((await as(guest, () => get(inherited.id))).status).toBe(404);
+    } finally {
+      visitor.provider.destroy();
+      visitor.socket.destroy();
+    }
+  });
 
   it("restricting the link keeps the response shape, updates GET at once, and disconnects link editor and anonymous reader", async () => {
     const db = await getDb();

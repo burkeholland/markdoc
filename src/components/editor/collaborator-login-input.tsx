@@ -129,8 +129,7 @@ export function CollaboratorLoginInput({
   const [shieldedCandidates, setShieldedCandidates] = useState<readonly GitHubUserDto[]>([]);
   const shieldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Tracks real focus (set by the input's own focus/blur handlers) rather than reading
-  // `document.activeElement`, which test harnesses can simulate without ever moving focus.
+  // Tracks focus between request callbacks; blur also checks for synchronous dialog focus repair.
   const focusedRef = useRef(false);
   // Last real pointer position seen anywhere over the list (see the options' onMouseMove below): an option
   // that renders — or re-renders — under an already-resting pointer gets Chromium's synthetic `mouseover`
@@ -153,7 +152,7 @@ export function CollaboratorLoginInput({
     // The caller already shows the right in-between state: a fresh debounced lookup is already "loading"
     // (set below, before the debounce timer schedules this call) and a manual retry is already "retrying".
     void api.github
-      .searchUsers(q, { signal: controller.signal })
+      .searchUsers(q, { signal: controller.signal, ...(manualRetry ? { cache: "no-store" } : {}) })
       .then((result) => {
         if (pendingRef.current?.id !== id) return;
         pendingRef.current = null;
@@ -347,6 +346,12 @@ export function CollaboratorLoginInput({
   };
 
   const handleBlur = () => {
+    // Dialog can refocus this input from a native focusout before React delivers the original onBlur.
+    // Do not overwrite that newer focus event or a successful lookup stays hidden under a focused field.
+    if (inputRef.current && document.activeElement === inputRef.current) {
+      focusedRef.current = true;
+      return;
+    }
     focusedRef.current = false;
     // Deferred, not synchronous: unmounting the listbox (setOpen(false) below) in the very same tick as blur
     // races the browser's own default action for whatever caused the blur — Tab's native focus-move, or a

@@ -131,7 +131,7 @@ function NotificationItem({
       <span className="min-w-0 flex-1">
         <span className="block text-[13px] leading-snug text-ink-2">
           <span className="font-medium text-ink">{actorLabel(notification)}</span> {sentence(notification)}
-          {notification.kind !== "share" && notification.documentId !== currentDocId && (
+          {notification.kind !== "share" && notification.kind !== "access.request" && notification.documentId !== currentDocId && (
             <>
               {" "}
               in <span className="font-medium text-ink">{notification.documentTitle}</span>

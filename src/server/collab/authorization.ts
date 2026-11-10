@@ -3,6 +3,7 @@ import { eq, inArray } from "drizzle-orm";
 import * as Y from "yjs";
 import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
+import { roleFromLink } from "@/server/document-access";
 import type { LinkAccess, Role } from "@/server/db/schema";
 import type { TokenScope } from "@/server/db/schema";
 import { resolveApiTokenById } from "@/server/tokens";
@@ -580,6 +581,21 @@ export async function changeFolderCollaboratorAccess(
   });
 }
 
+/** Folder link changes can affect every principal, including direct collaborators and anonymous readers. */
+export async function changeFolderLinkAccess(folderId: string, mutation: () => Promise<void>): Promise<void> {
+  await withAccessLocks([`folder:${folderId}`], async () => {
+    const db = await getDb();
+    const documents = await db.select({ id: schema.documents.id }).from(schema.documents).where(eq(schema.documents.folderId, folderId));
+    await transitionAccessMany({
+      docIds: documents.map(({ id }) => id),
+      select: (_docId, connections) => connections,
+      gate: true,
+      mutation,
+      what: "folder link",
+    });
+  });
+}
+
 /** Re-resolve every live connection when an owner moves documents into or out of a shared folder. */
 export async function changeDocumentFolderAccess(documentIds: readonly string[], targetFolderId: string | null, mutation: () => Promise<void>): Promise<void> {
   if (documentIds.length === 0) {
@@ -618,22 +634,22 @@ export async function changeDocumentFolderAccess(documentIds: readonly string[],
 }
 
 /**
- * Apply a link-access database mutation to a document. Every live connection whose access derives
- * from the link — neither the owner, direct collaborator nor folder sharee, anonymous visitors included — is
- * paused, flushed and re-resolved: a closed link disconnects them (4401), a downgraded link makes
- * them read-only, and edits accepted before the change are kept. Other access sources are untouched.
+ * Re-resolve link-derived access and upgrades that outrank another grant. Unaffected stronger
+ * grants keep saving without a pause.
  */
 export async function changeLinkAccess(docId: string, newLinkAccess: LinkAccess, mutation: () => Promise<void>): Promise<void> {
   await transitionAccess({
     docId,
     select: async (connections) => {
-      if (connections.length === 0) return [];
-      const access = await Promise.all(connections.map(async (connection) => {
-        const context = connection.context as CollabContext;
+      const affected = await Promise.all(connections.map(async (connection) => {
+        const context = connection.context;
         const user = context.userId.startsWith("anon-") ? null : { id: context.userId, login: context.login ?? null };
-        return [connection, await getDocumentAccess(docId, user)] as const;
+        const current = await getDocumentAccess(docId, user);
+        const nextLinkRole = roleFromLink(newLinkAccess, user !== null);
+        return !current || current.source === "link" || (nextLinkRole !== null && ROLE_RANK[nextLinkRole] > ROLE_RANK[current.role])
+          ? connection : null;
       }));
-      return access.filter(([, current]) => current?.source === "link").map(([connection]) => connection);
+      return affected.filter((connection) => connection !== null);
     },
     // Only "edit" admits link visitors as editors; every other value can take editing away.
     gate: newLinkAccess !== "edit",

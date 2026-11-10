@@ -96,6 +96,7 @@ export const folders = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    linkAccess: text("link_access").$type<LinkAccess>().notNull().default("private"),
     ownerId: text("owner_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -431,6 +432,27 @@ export const notifications = pgTable(
 );
 
 export type Notification = typeof notifications.$inferSelect;
+
+/** Folder notifications have their own resource FK; they never masquerade as document notifications. */
+export const folderNotifications = pgTable(
+  "folder_notification",
+  {
+    id: text("id").primaryKey(),
+    userLogin: text("user_login").notNull(),
+    folderId: text("folder_id").notNull().references(() => folders.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"share" | "access.request">().notNull(),
+    actorLogin: text("actor_login"),
+    actorName: text("actor_name"),
+    refId: text("ref_id").notNull(),
+    snippet: text("snippet").notNull().default(""),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    readAt: timestamp("read_at", { mode: "date", withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("folder_notification_user_kind_ref_idx").on(t.userLogin, t.kind, t.refId),
+    index("folder_notification_user_read_created_idx").on(t.userLogin, t.readAt, t.createdAt.desc()),
+  ],
+);
 
 export type ActivityAction =
   | "edit"

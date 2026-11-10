@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as Y from "yjs";
+import { notificationLoginRefId } from "../../src/lib/notification-ref";
 import {
   normalizeRepairGithubAccountId,
   normalizeRepairGithubLogin,
@@ -51,12 +52,16 @@ export const TRANSFER_SOFT_USER_REFERENCES = [
   "activity.actor_id",
 ] as const;
 
-/** Columns keyed by GitHub login rather than user id; they follow the source login to the target login. */
+/** Login columns and producer-scoped composite identity keys that follow the source login. */
 export const TRANSFER_LOGIN_REFERENCES = [
   "collaborator.login",
   "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
+  "notification.ref_id (share/access.request)",
+  "folder_notification.user_login",
+  "folder_notification.actor_login",
+  "folder_notification.ref_id (share/access.request)",
 ] as const;
 
 export const TRANSFER_COUNT_LABELS = [
@@ -87,6 +92,13 @@ export const TRANSFER_COUNT_LABELS = [
   "notification.user_login moved",
   "notification.user_login deduplicated",
   "notification.actor_login updated",
+  "notification.actor_login deduplicated",
+  "notification.ref_id updated",
+  "folder_notification.user_login moved",
+  "folder_notification.user_login deduplicated",
+  "folder_notification.actor_login updated",
+  "folder_notification.actor_login deduplicated",
+  "folder_notification.ref_id updated",
   "document.ystate identity metadata (not rewritten)",
   "user deleted",
 ] as const;
@@ -766,25 +778,61 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
       deletedFolderCollaborators.add(folderCollaboratorKey(folderId, login));
     }
 
-    const notifications = await client.query<{ row: Row; id: string; kind: string; ref_id: string; user_login: string }>(
-      `SELECT to_jsonb(n) AS row, n.id, n.kind, n.ref_id, n.user_login FROM notification n WHERE lower(btrim(n.user_login)) = $1 ORDER BY n.id`,
-      [sourceLogin],
-    );
-    for (const { row, id, kind, ref_id: refId, user_login: userLogin } of notifications.rows) {
-      const duplicate = await countWhere(
-        client,
-        `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 AND kind = $2 AND ref_id = $3`,
-        [targetLogin, kind, refId],
+    for (const table of ["notification", "folder_notification"] as const) {
+      const resourceColumn = table === "notification" ? "document_id" : "folder_id";
+      const notifications = await client.query<{ row: Row; id: string; kind: string; resource_id: string; ref_id: string; user_login: string; actor_login: string | null }>(
+        `SELECT to_jsonb(n) AS row, n.id, n.kind, n.${resourceColumn} AS resource_id, n.ref_id, n.user_login, n.actor_login
+           FROM ${table} n WHERE lower(btrim(n.user_login)) = $1 OR lower(btrim(n.actor_login)) = $1 ORDER BY n.id`,
+        [sourceLogin],
       );
-      if (duplicate) add({ kind: "delete", table: "notification", key: { id }, row, label: "notification.user_login deduplicated" });
-      else update("notification", { id }, "user_login", userLogin, targetLogin, "notification.user_login moved");
-    }
-    const actorLogins = await client.query<{ id: string; actor_login: string }>(
-      `SELECT id, actor_login FROM notification WHERE lower(btrim(actor_login)) = $1 ORDER BY id`,
-      [sourceLogin],
-    );
-    for (const row of actorLogins.rows) {
-      update("notification", { id: row.id }, "actor_login", row.actor_login, targetLogin, "notification.actor_login updated");
+      const projected = notifications.rows.map((row) => {
+        const recipientChanges = normalizeRepairGithubLogin(row.user_login) === sourceLogin;
+        const actorChanges = normalizeRepairGithubLogin(row.actor_login) === sourceLogin;
+        const refChanges = row.ref_id === notificationLoginRefId(row.resource_id, sourceLogin) &&
+          ((row.kind === "share" && recipientChanges) || (row.kind === "access.request" && actorChanges));
+        return {
+          ...row,
+          userLogin: recipientChanges ? targetLogin : row.user_login,
+          actorLogin: actorChanges ? targetLogin : row.actor_login,
+          refId: refChanges ? notificationLoginRefId(row.resource_id, targetLogin) : row.ref_id,
+        };
+      });
+      const groups = new Map<string, typeof projected>();
+      const sourceIds = new Set(projected.map((row) => row.id));
+      for (const row of projected) {
+        const key = canonicalJson([row.userLogin.trim().toLowerCase(), row.kind, row.refId]);
+        const group = groups.get(key) ?? [];
+        group.push(row);
+        groups.set(key, group);
+      }
+      for (const group of groups.values()) {
+        const destination = group[0];
+        const existing = await client.query<{ id: string }>(
+          `SELECT id FROM ${table} WHERE lower(btrim(user_login)) = $1 AND kind = $2 AND ref_id = $3 ORDER BY id`,
+          [destination.userLogin.trim().toLowerCase(), destination.kind, destination.refId],
+        );
+        const groupIds = new Set(group.map((row) => row.id));
+        const outside = existing.rows.filter((row) => !groupIds.has(row.id));
+        if (outside.some((row) => sourceIds.has(row.id))) throw new LegacyOwnershipTransferError("UNIQUE_CONFLICT");
+        // Keep the existing destination, or the already-addressed target row when two changing keys converge.
+        const keeper = outside.length ? undefined :
+          group.find((row) => existing.rows.some((candidate) => candidate.id === row.id)) ??
+          group.find((row) => row.userLogin === row.user_login) ?? group[0];
+        for (const row of group) {
+          const key = { id: row.id };
+          if (row !== keeper) {
+            add({
+              kind: "delete", table, key, row: row.row,
+              label: row.userLogin !== row.user_login ? `${table}.user_login deduplicated` : `${table}.actor_login deduplicated`,
+            });
+            continue;
+          }
+          // Change the key before moving its recipient; the old recipient/key pair may already exist at the target.
+          if (row.refId !== row.ref_id) update(table, key, "ref_id", row.ref_id, row.refId, `${table}.ref_id updated`);
+          if (row.userLogin !== row.user_login) update(table, key, "user_login", row.user_login, row.userLogin, `${table}.user_login moved`);
+          if (row.actorLogin !== row.actor_login) update(table, key, "actor_login", row.actor_login, row.actorLogin, `${table}.actor_login updated`);
+        }
+      }
     }
   }
 
@@ -1011,11 +1059,16 @@ async function countResidualReferences(
   if (sourceLogin !== targetLogin) {
     total += await countWhere(client, `SELECT COUNT(*)::text AS count FROM collaborator WHERE lower(btrim(login)) = $1`, [sourceLogin]);
     total += await countWhere(client, `SELECT COUNT(*)::text AS count FROM folder_collaborator WHERE lower(btrim(login)) = $1`, [sourceLogin]);
-    total += await countWhere(
-      client,
-      `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 OR lower(btrim(actor_login)) = $1`,
-      [sourceLogin],
-    );
+    for (const table of ["notification", "folder_notification"] as const) {
+      const resourceColumn = table === "notification" ? "document_id" : "folder_id";
+      total += await countWhere(
+        client,
+        `SELECT COUNT(*)::text AS count FROM ${table}
+          WHERE lower(btrim(user_login)) = $1 OR lower(btrim(actor_login)) = $1
+             OR (kind IN ('share', 'access.request') AND ref_id = ${resourceColumn} || ':' || $1)`,
+        [sourceLogin],
+      );
+    }
   }
   return total;
 }

@@ -16,8 +16,12 @@ vi.mock("next/headers", () => ({ headers: async () => new Headers(bearer ? { aut
 
 const { getDb, schema } = await import("@/server/db");
 const { createApiToken } = await import("@/server/tokens");
-const { searchUsers, USER_SEARCH_LIMIT, USER_SEARCH_LIMITED_LOG_INTERVAL_MS } = await import("@/server/github");
+const github = await import("@/server/github");
+const documents = await import("@/server/documents");
+const { searchUsers, USER_SEARCH_LIMIT, USER_SEARCH_LIMITED_LOG_INTERVAL_MS } = github;
 const { GET } = await import("./route");
+
+const octokitWith = (users: (q: string) => Promise<unknown>) => ({ search: { users: (params: { q: string }) => users(params.q) } }) as unknown as import("@octokit/rest").Octokit;
 
 type Body = { users: { login: string; name: string | null; avatarUrl: string }[]; limited: boolean; reason?: string; error?: string; issues?: { message: string }[] };
 
@@ -141,10 +145,60 @@ describe("GET /api/github/users", () => {
       process.env.GITHUB_MOCK = "1";
     }
   });
+
+  it.each([{ items: [] }, { items: [{ login: "octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231" }] }])(
+    "does not turn GitHub's incomplete results ($items) into a cacheable successful search",
+    async ({ items }) => {
+      process.env.GITHUB_MOCK = "0";
+      const token = vi.spyOn(documents, "getGitHubToken").mockResolvedValue("isolated-search-fixture");
+      const lookup = vi.fn()
+        .mockResolvedValueOnce({ data: { incomplete_results: true, items } })
+        .mockResolvedValueOnce({ data: { incomplete_results: false, items: [{ login: "octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231" }] } });
+      const client = vi.spyOn(github, "githubClient").mockReturnValue(
+        octokitWith(lookup),
+      );
+      try {
+        const res = await get("?q=octo");
+        expect(res.status).toBe(503);
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        expect(await res.json()).toEqual({ error: "GitHub account search did not finish. Please try again." });
+        const recovered = await get("?q=octo");
+        expect(recovered.status).toBe(200);
+        expect(recovered.headers.get("cache-control")).toBe("private, max-age=60");
+        expect(((await recovered.json()) as Body).users.map((user) => user.login)).toEqual(["octocat"]);
+        expect(lookup).toHaveBeenCalledTimes(2);
+      } finally {
+        token.mockRestore();
+        client.mockRestore();
+        process.env.GITHUB_MOCK = "1";
+      }
+    },
+  );
+
+  it("does not cache a rate-limited answer that Retry must be able to replace", async () => {
+    process.env.GITHUB_MOCK = "0";
+    const token = vi.spyOn(documents, "getGitHubToken").mockResolvedValue("isolated-search-fixture");
+    const client = vi.spyOn(github, "githubClient").mockReturnValue(
+      octokitWith(async () => { throw Object.assign(new Error("Search rate limit exceeded"), { status: 429 }); }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const res = await get("?q=octo");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({ users: [], limited: true });
+    } finally {
+      token.mockRestore();
+      client.mockRestore();
+      warn.mockRestore();
+      now.mockRestore();
+      process.env.GITHUB_MOCK = "1";
+    }
+  });
 });
 
 describe("searchUsers()", () => {
-  const octokitWith = (users: (q: string) => Promise<unknown>) => ({ search: { users: (params: { q: string }) => users(params.q) } }) as unknown as import("@octokit/rest").Octokit;
   /** GitHub refusing the search the way Octokit reports it: `status` plus, when there was a response, its headers. */
   const throttled = (status: number, headers?: Record<string, string>) =>
     octokitWith(() => Promise.reject(Object.assign(new Error("API rate limit exceeded for user ID 1"), { status, response: headers ? { headers } : undefined })));

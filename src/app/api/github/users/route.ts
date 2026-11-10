@@ -21,7 +21,8 @@ const querySchema = z.object({
  * `GET /api/github/users?q=<prefix>`: up to 8 GitHub accounts whose login matches, for the Share
  * dialog's handle autocomplete: `{ users: [{ login, name, avatarUrl }], limited }`. Browser sessions
  * only: an API token gets 403 (a leaked token must not be able to search accounts through the
- * user's GitHub credentials). When GitHub rate-limits the search, `limited: true` with no users.
+ * user's GitHub credentials). Rate limiting answers `limited: true` with no users; incomplete
+ * GitHub searches answer 503. Neither is cached, so Retry can make a fresh request.
  * A session that signed in without GitHub has no token to search with: that is not a malformed
  * request, so it answers 200 `{ users: [], limited: false, reason: "no-github-token" }` and the
  * client stops asking for the life of the dialog (task #1481: every such share used to log 400s).
@@ -34,5 +35,5 @@ export const GET = handler(async (req: Request) => {
   const token = isGitHubMock() ? "mock" : await getGitHubToken(user.id);
   if (!token) return json({ users: [], limited: false, reason: "no-github-token" }, { headers: { "Cache-Control": "private, max-age=60" } });
   const result = await searchUsers(githubClient(token), q);
-  return json(result, { headers: { "Cache-Control": "private, max-age=60" } });
+  return json(result, { headers: { "Cache-Control": result.limited ? "no-store" : "private, max-age=60" } });
 });

@@ -23,6 +23,7 @@ export const REPAIR_SCHEMA_TABLES = [
   "document",
   "folder",
   "folder_collaborator",
+  "folder_notification",
   "gist_auto_update",
   "notification",
   "ownership_transfer",
@@ -53,6 +54,7 @@ export const REPAIR_APPLICATION_TABLES = [
   "document",
   "folder",
   "folder_collaborator",
+  "folder_notification",
   "gist_auto_update",
   "notification",
   "recent",
@@ -96,6 +98,8 @@ export const USER_IDENTITY_CLASSIFICATIONS = [
   "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
+  "folder_notification.user_login",
+  "folder_notification.actor_login",
   "document.ystate identity metadata",
 ] as const;
 
@@ -121,10 +125,13 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
+  "folder_notification.user_login",
+  "folder_notification.actor_login",
   "document.ystate identity metadata",
   "gist_auto_update.document_id via duplicate-owned document",
   "collaborator.document_id via duplicate-owned document",
   "folder_collaborator.folder_id via duplicate-owned folder",
+  "folder_notification.folder_id via duplicate-owned folder",
   "version.document_id via duplicate-owned document",
   "required_version_intent.document_id via duplicate-owned document",
   "star.document_id via duplicate-owned document",
@@ -378,7 +385,7 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                     deleted_at::text AS deleted_at
                FROM document`,
   folder: `SELECT xmin::text AS row_version,
-                  id, name, owner_id,
+                  id, name, owner_id, link_access,
                   created_at::text AS created_at,
                   updated_at::text AS updated_at
              FROM folder`,
@@ -386,6 +393,11 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                               folder_id, login, role, added_by,
                               created_at::text AS created_at
                          FROM folder_collaborator`,
+  folder_notification: `SELECT xmin::text AS row_version,
+                                id, user_login, folder_id, kind, actor_login, ref_id,
+                                created_at::text AS created_at,
+                                read_at::text AS read_at
+                           FROM folder_notification`,
   gist_auto_update: `SELECT xmin::text AS row_version,
                            document_id, publisher_id, gist_id, filename, account_login, is_public,
                            enabled, generation, queued_version, synced_version, active_version, status,
@@ -828,6 +840,8 @@ async function selectAndValidateInitialState(
     "folder_collaborator.login",
     "notification.user_login",
     "notification.actor_login",
+    "folder_notification.user_login",
+    "folder_notification.actor_login",
   ]);
   if (
     APPLICATION_DEPENDENCY_LABELS.some(
@@ -906,6 +920,16 @@ async function collectApplicationDependencies(
       values: [expectedLogin],
     },
     {
+      label: "folder_notification.user_login",
+      query: "SELECT COUNT(*)::text AS count FROM folder_notification WHERE lower(btrim(user_login)) = $1",
+      values: [expectedLogin],
+    },
+    {
+      label: "folder_notification.actor_login",
+      query: "SELECT COUNT(*)::text AS count FROM folder_notification WHERE lower(btrim(actor_login)) = $1",
+      values: [expectedLogin],
+    },
+    {
       label: "gist_auto_update.document_id via duplicate-owned document",
       query: `SELECT COUNT(*)::text AS count
                 FROM gist_auto_update g JOIN document d ON d.id = g.document_id
@@ -923,6 +947,13 @@ async function collectApplicationDependencies(
       label: "folder_collaborator.folder_id via duplicate-owned folder",
       query: `SELECT COUNT(*)::text AS count
                 FROM folder_collaborator fc JOIN folder f ON f.id = fc.folder_id
+               WHERE f.owner_id = $1`,
+      values: [duplicateId],
+    },
+    {
+      label: "folder_notification.folder_id via duplicate-owned folder",
+      query: `SELECT COUNT(*)::text AS count
+                FROM folder_notification n JOIN folder f ON f.id = n.folder_id
                WHERE f.owner_id = $1`,
       values: [duplicateId],
     },

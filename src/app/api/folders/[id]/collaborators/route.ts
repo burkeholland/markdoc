@@ -8,8 +8,11 @@ import {
   getFolderForOwner,
   listFolderCollaborators,
   removeFolderCollaborator,
+  folderAccessExceptions,
 } from "@/server/folders";
 import { getUserById, getUserByLogin } from "@/server/documents";
+import { notifyFolderShare } from "@/server/notifications";
+import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -52,6 +55,8 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
   return json({
     owner: owner ? { login: owner.login, name: owner.name, image: owner.image } : null,
     collaborators: collaborators.map((collaborator) => ({ ...collaborator, createdAt: collaborator.createdAt.toISOString() })),
+    linkAccess: folder.linkAccess,
+    exceptions: await folderAccessExceptions(folder, collaborators),
   });
 });
 
@@ -78,7 +83,9 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     if (write.outcome === "refused") throw alreadyCollaborator(login, write.role);
   });
   if (write.outcome !== "written") return json(added, { status });
-  return json(added, { status });
+  const { tail, answer } = warnTail("folder-collaborators");
+  if (!current) await tail("notification-not-sent", () => notifyFolderShare(id, login, body.role, user));
+  return json(answer(added), { status });
 });
 
 export const DELETE = handler(async (req: Request, { params }: Params) => {

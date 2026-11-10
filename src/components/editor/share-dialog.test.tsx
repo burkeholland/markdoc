@@ -7,6 +7,9 @@ import { ShareDialog } from "./share-dialog";
 import { ApiError, api, type CollaboratorDto } from "@/lib/api";
 import { COPY_FALLBACK_HINT, copyText } from "@/lib/clipboard";
 import type { DocumentDto } from "@/server/dto";
+import { signOutSafely } from "@/lib/sign-out";
+
+vi.mock("@/lib/sign-out", () => ({ signOutSafely: vi.fn() }));
 
 vi.mock("@/lib/clipboard", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/clipboard")>();
@@ -14,7 +17,7 @@ vi.mock("@/lib/clipboard", async (importOriginal) => {
 });
 
 const notifications = vi.hoisted(() => ({ markNotificationRead: vi.fn() }));
-vi.mock("@/lib/notifications-store", () => notifications);
+vi.mock("@/lib/notifications-store", () => ({ markNotificationReadConfirmed: notifications.markNotificationRead }));
 
 type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
 type Role = CollaboratorDto["role"];
@@ -62,6 +65,7 @@ function renderShare({
   open = true,
   document = doc(),
   isOwner = true,
+  signedIn = true,
   onOpenChange = vi.fn(),
   onDocChange = vi.fn(),
   onConnectAgent,
@@ -70,6 +74,7 @@ function renderShare({
   open?: boolean;
   document?: DocumentDto;
   isOwner?: boolean;
+  signedIn?: boolean;
   onOpenChange?: (open: boolean) => void;
   onDocChange?: (document: DocumentDto) => void;
   onConnectAgent?: () => void;
@@ -84,6 +89,7 @@ function renderShare({
         onOpenChange={onOpenChange}
         doc={document}
         isOwner={isOwner}
+        signedIn={signedIn}
         onDocChange={onDocChange}
         onConnectAgent={onConnectAgent}
         accessRequest={accessRequest}
@@ -103,13 +109,15 @@ async function fillLogin(value: string) {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
+  vi.mocked(signOutSafely).mockReset().mockResolvedValue(true);
   vi.spyOn(api.github, "searchUsers").mockResolvedValue({ users: [], limited: false });
   vi.spyOn(api.documents, "collaborators").mockResolvedValue(people());
   vi.spyOn(api.documents, "addCollaborator").mockResolvedValue({ ok: true, login: "added", role: "editor", pending: false });
   vi.spyOn(api.documents, "removeCollaborator").mockResolvedValue({ ok: true });
   vi.spyOn(api.documents, "patch").mockResolvedValue({ document: doc({ linkAccess: "view" }) });
   vi.mocked(copyText).mockResolvedValue(true);
-  notifications.markNotificationRead.mockReset().mockResolvedValue(undefined);
+  notifications.markNotificationRead.mockReset().mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -124,10 +132,12 @@ describe("ShareDialog", () => {
     it("shows a compact requester-specific decision without loading the share settings", () => {
       renderShare({ accessRequest: request });
 
-      expect(screen.getByRole("dialog", { name: "Access request" })).toBeVisible();
-      expect(screen.getByText("Zoe Example (@zoe) requested access to “Launch Plan”.")).toBeInTheDocument();
-      expect(screen.getByText("Granting gives view access only.")).toBeInTheDocument();
+      expect(screen.getByRole("dialog", { name: "Share document “Launch Plan”" })).toBeVisible();
+      expect(screen.getByText("Zoe Example (@zoe) requested access to this document.")).toBeInTheDocument();
+      expect(screen.getByText("Adds a View grant on this document only. Higher access from other grants is kept.")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Deny request" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Sign in as owner" })).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Grant view access" })).toBeInTheDocument();
       expect(screen.queryByTestId("share-presentation")).not.toBeInTheDocument();
       expect(api.documents.collaborators).not.toHaveBeenCalled();
@@ -146,7 +156,7 @@ describe("ShareDialog", () => {
     });
 
     it("waits for the notification read to finish before closing after a grant", async () => {
-      const read = deferred<void>();
+      const read = deferred<boolean>();
       const onOpenChange = vi.fn();
       notifications.markNotificationRead.mockReturnValueOnce(read.promise);
       renderShare({ accessRequest: request, onOpenChange });
@@ -158,7 +168,7 @@ describe("ShareDialog", () => {
       expect(onOpenChange).not.toHaveBeenCalled();
 
       await act(async () => {
-        read.resolve(undefined);
+        read.resolve(true);
         await read.promise;
       });
 
@@ -174,6 +184,19 @@ describe("ShareDialog", () => {
       expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
       expect(api.documents.addCollaborator).not.toHaveBeenCalled();
       await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    });
+
+    it("keeps an unconfirmed notification dismissal open with an explicit error and allows retry", async () => {
+      notifications.markNotificationRead.mockResolvedValueOnce(false);
+      const onOpenChange = vi.fn();
+      renderShare({ accessRequest: request, onOpenChange });
+      fireEvent.click(screen.getByTestId("access-request-deny"));
+      expect(await screen.findByTestId("access-request-error")).toHaveTextContent("Could not mark this request as resolved");
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("access-request-deny"));
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+      expect(notifications.markNotificationRead).toHaveBeenCalledTimes(2);
     });
 
     it("keeps a failed grant open and unread so it can be retried", async () => {
@@ -213,6 +236,29 @@ describe("ShareDialog", () => {
       expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
       expect(notifications.markNotificationRead).not.toHaveBeenCalled();
     });
+
+    it("offers a bounded sign-in return for an anonymous request after the editor consumes the URL context", () => {
+      window.history.replaceState(null, "", "/d/doc-1?share=1&redirect=https%3A%2F%2Funtrusted.example");
+      renderShare({ accessRequest: request, isOwner: false, signedIn: false });
+      expect(screen.getByRole("link", { name: "Sign in as owner" })).toHaveAttribute("href", "/login?next=%2Fd%2Fdoc-1%3Fshare%3D1%26accessRequest%3Dzoe%26notification%3Drequest-one");
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      expect(api.documents.collaborators).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])("delegates wrong-account request recovery to safe sign-out, including confirmation=%s, without granting or reading", async (confirmed) => {
+      vi.mocked(signOutSafely).mockResolvedValue(confirmed);
+      window.history.replaceState(null, "", "/d/doc-1?share=1&redirect=https%3A%2F%2Funtrusted.example");
+      renderShare({ accessRequest: request, isOwner: false, signedIn: true });
+      expect(signOutSafely).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
+      await waitFor(() => expect(signOutSafely).toHaveBeenCalledExactlyOnceWith("/login?next=%2Fd%2Fdoc-1%3Fshare%3D1%26accessRequest%3Dzoe%26notification%3Drequest-one"));
+      expect(screen.getByRole("dialog", { name: "Share document “Launch Plan”" })).toBeVisible();
+      expect(api.documents.collaborators).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
   });
 
   it("shows a loading state, then people with access or an empty list", async () => {
@@ -239,13 +285,13 @@ describe("ShareDialog", () => {
   });
 
   it("explains that folder access is inherited without mixing it into direct collaborators", async () => {
-    vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice], owner, { id: "folder-1", name: "Planning" }));
+    vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice], owner, { id: "folder-1", name: "Planning", linkAccess: "edit" }));
 
     renderShare();
     await loadedRows();
 
     expect(screen.getByTestId("folder-inherited-access")).toHaveTextContent(
-      "People shared with Planning also have access to this document.",
+      "This document inherits access from folder Planning. Folder link access: edit.",
     );
     expect(screen.getAllByTestId("collaborator-row")).toHaveLength(1);
   });

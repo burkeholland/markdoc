@@ -3605,7 +3605,7 @@ export function EditorShell({
 
         {!embed && (
           <>
-            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} onConnectAgent={openConnectAgent} accessRequest={accessRequest?.documentId === doc.id ? accessRequest : null} onAccessRequestClosed={clearAccessRequest} />}
+            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} signedIn={!!user.login} onDocChange={setDoc} onConnectAgent={openConnectAgent} accessRequest={accessRequest?.documentId === doc.id ? accessRequest : null} onAccessRequestClosed={clearAccessRequest} />}
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} managedAccount={isManagedGithubLogin(user.login)} isOwner={isOwner} />
             )}

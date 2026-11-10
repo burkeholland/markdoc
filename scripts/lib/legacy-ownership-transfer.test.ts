@@ -47,7 +47,7 @@ describe("legacy ownership transfer", () => {
     expect(declared.sort()).toEqual([...TRANSFER_USER_FOREIGN_KEYS]);
     expect([...TRANSFER_USER_FOREIGN_KEYS]).toEqual([...TRANSFER_USER_FOREIGN_KEYS].sort());
     expect(TRANSFER_SOFT_USER_REFERENCES).toHaveLength(5);
-    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(4);
+    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(8);
   });
 
   it("dry-runs the production shape as counts only and writes nothing", async () => {
@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 4, rollbackTableReady: true },
+        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,
@@ -130,7 +130,8 @@ describe("legacy ownership transfer", () => {
            (SELECT COUNT(*) FROM review WHERE user_id = $1) +
            (SELECT COUNT(*) FROM webhook WHERE user_id = $1) +
            (SELECT COUNT(*) FROM activity WHERE actor_id = $1 OR actor_id LIKE 'agent:' || $1 || ':%') +
-           (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2)
+           (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2) +
+           (SELECT COUNT(*) FROM folder_notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2)
          )::text AS count`,
         [SOURCE_ID, SOURCE_LOGIN],
       );
@@ -141,6 +142,13 @@ describe("legacy ownership transfer", () => {
       expect(folderRoles.rows).toEqual([
         { folder_id: "fold-other", login: TARGET_LOGIN, role: "editor", added_by: OTHER_ID },
         { folder_id: "fold-other-move", login: TARGET_LOGIN, role: "viewer", added_by: TARGET_ID },
+      ]);
+      expect((await fixture.database.query(
+        `SELECT id, user_login, actor_login, ref_id FROM folder_notification ORDER BY id`,
+      )).rows).toEqual([
+        { id: "folder-note-actor", user_login: "other", actor_login: TARGET_LOGIN, ref_id: `fold-legacy:${TARGET_LOGIN}` },
+        { id: "folder-note-dup-target", user_login: TARGET_LOGIN, actor_login: "other", ref_id: `fold-other:${TARGET_LOGIN}` },
+        { id: "folder-note-move", user_login: TARGET_LOGIN, actor_login: "other", ref_id: `fold-other-move:${TARGET_LOGIN}` },
       ]);
       // Rows that never mentioned the source user are byte-for-byte unchanged.
       for (const table of ALL_TABLES) {
@@ -194,6 +202,105 @@ describe("legacy ownership transfer", () => {
       ).rejects.toMatchObject({ reason: "TRANSFER_RECORD_COUNT" });
     } finally {
       await fixture.database.close();
+    }
+  }, 120_000);
+
+  it.each([
+    { table: "notification", column: "document_id", resource: "doc-o1", second: "doc-o2", resourceTable: "document" },
+    { table: "folder_notification", column: "folder_id", resource: "fold-other", second: "fold-other-move", resourceTable: "folder" },
+  ] as const)("normalizes $table producer keys, keeps semantic collisions and unrelated IDs intact, and restores exact rows", async ({ table, column, resource, second, resourceTable }) => {
+    const fixture = await createFixture();
+    const { database, client } = fixture;
+    try {
+      await database.query(`DELETE FROM ${table}`);
+      const prefixResource = `${SOURCE_LOGIN}-resource`;
+      await database.query(
+        `INSERT INTO ${resourceTable} (id, ${resourceTable === "document" ? "title" : "name"}, owner_id) VALUES ($1, 'Identity key fixture', $2)`,
+        [prefixResource, OTHER_ID],
+      );
+      const rows = [
+        ["share-source", SOURCE_LOGIN, "other", "share", resource, `${resource}:${SOURCE_LOGIN}`],
+        ["share-target", TARGET_LOGIN, "other", "share", resource, `${resource}:${TARGET_LOGIN}`],
+        ["share-move", SOURCE_LOGIN.toUpperCase(), "other", "share", second, `${second}:${SOURCE_LOGIN}`],
+        ["share-actor", "recipient", SOURCE_LOGIN, "share", resource, `${resource}:recipient`],
+        ["request-actor-source", "other", SOURCE_LOGIN, "access.request", resource, `${resource}:${SOURCE_LOGIN}`],
+        ["request-actor-target", "other", TARGET_LOGIN, "access.request", resource, `${resource}:${TARGET_LOGIN}`],
+        ["request-actor-move", "other", SOURCE_LOGIN.toUpperCase(), "access.request", second, `${second}:${SOURCE_LOGIN}`],
+        ["request-recipient-source", SOURCE_LOGIN, "requester", "access.request", resource, `${resource}:requester`],
+        ["request-recipient-target", TARGET_LOGIN, "requester", "access.request", resource, `${resource}:requester`],
+        ["request-recipient-move", SOURCE_LOGIN, "requester", "access.request", second, `${second}:requester`],
+        ["cross-recipient", SOURCE_LOGIN, TARGET_LOGIN, "access.request", second, `${second}:${TARGET_LOGIN}`],
+        ["cross-actor", TARGET_LOGIN, SOURCE_LOGIN, "access.request", second, `${second}:${SOURCE_LOGIN}`],
+        ["opaque-request", "other", SOURCE_LOGIN, "access.request", resource, `opaque:${SOURCE_LOGIN}:reply`],
+        ["prefix-share", SOURCE_LOGIN, "other", "share", prefixResource, `${prefixResource}:${SOURCE_LOGIN}`],
+        ["prefix-actor", "other", SOURCE_LOGIN, "share", prefixResource, `${prefixResource}:other`],
+      ];
+      if (table === "notification") rows.push(
+        ["mention-both", SOURCE_LOGIN, SOURCE_LOGIN, "mention", resource, `${resource}:${SOURCE_LOGIN}`],
+        ["mention-collision-source", SOURCE_LOGIN, SOURCE_LOGIN, "mention", resource, `thread:${SOURCE_LOGIN}:shared`],
+        ["mention-collision-target", TARGET_LOGIN, "other", "mention", resource, `thread:${SOURCE_LOGIN}:shared`],
+      );
+      for (const [id, recipient, actor, kind, resourceId, refId] of rows) {
+        await database.query(
+          `INSERT INTO ${table} (id, user_login, actor_login, kind, ${column}, ref_id, snippet, created_at, read_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $1, '2026-09-01T01:02:03.123456Z', '2026-09-02T03:04:05.654321Z')`,
+          [id, recipient, actor, kind, resourceId, refId],
+        );
+      }
+      const seed = await snapshot(database);
+      const applied = await transferLegacyOwnership({ client, sourceLogin: SOURCE_LOGIN, providerAccountId: ACCOUNT_ID, mode: "apply" });
+      const actual = await database.query<{ id: string; user_login: string; actor_login: string; ref_id: string }>(
+        `SELECT id, user_login, actor_login, ref_id FROM ${table} ORDER BY id`,
+      );
+      expect(Object.fromEntries(actual.rows.map((row) => [row.id, [row.user_login, row.actor_login, row.ref_id]]))).toEqual({
+        "share-target": [TARGET_LOGIN, "other", `${resource}:${TARGET_LOGIN}`],
+        "share-move": [TARGET_LOGIN, "other", `${second}:${TARGET_LOGIN}`],
+        "share-actor": ["recipient", TARGET_LOGIN, `${resource}:recipient`],
+        "request-actor-target": ["other", TARGET_LOGIN, `${resource}:${TARGET_LOGIN}`],
+        "request-actor-move": ["other", TARGET_LOGIN, `${second}:${TARGET_LOGIN}`],
+        "request-recipient-target": [TARGET_LOGIN, "requester", `${resource}:requester`],
+        "request-recipient-move": [TARGET_LOGIN, "requester", `${second}:requester`],
+        "cross-actor": [TARGET_LOGIN, TARGET_LOGIN, `${second}:${TARGET_LOGIN}`],
+        "opaque-request": ["other", TARGET_LOGIN, `opaque:${SOURCE_LOGIN}:reply`],
+        "prefix-share": [TARGET_LOGIN, "other", `${prefixResource}:${TARGET_LOGIN}`],
+        "prefix-actor": ["other", TARGET_LOGIN, `${prefixResource}:other`],
+        ...(table === "notification" ? {
+          "mention-both": [TARGET_LOGIN, TARGET_LOGIN, `${resource}:${SOURCE_LOGIN}`],
+          "mention-collision-target": [TARGET_LOGIN, "other", `thread:${SOURCE_LOGIN}:shared`],
+        } : {}),
+      });
+      expect(applied.operations).toMatchObject({
+        [`${table}.user_login moved`]: table === "notification" ? 4 : 3,
+        [`${table}.user_login deduplicated`]: table === "notification" ? 4 : 3,
+        [`${table}.actor_login updated`]: table === "notification" ? 6 : 5,
+        [`${table}.actor_login deduplicated`]: 1,
+        [`${table}.ref_id updated`]: 4,
+      });
+      for (const [recipient, actor, kind, refId] of [
+        [TARGET_LOGIN, "other", "share", `${second}:${TARGET_LOGIN}`],
+        ["other", TARGET_LOGIN, "access.request", `${second}:${TARGET_LOGIN}`],
+        [TARGET_LOGIN, "requester", "access.request", `${second}:requester`],
+      ]) {
+        const duplicate = await database.query(
+          `INSERT INTO ${table} (id, user_login, actor_login, kind, ${column}, ref_id)
+           VALUES ('producer-retry', $1, $2, $3, $4, $5) ON CONFLICT (user_login, kind, ref_id) DO NOTHING RETURNING id`,
+          [recipient, actor, kind, second, refId],
+        );
+        expect(duplicate.rows).toEqual([]);
+      }
+      const after = await snapshot(database);
+      for (const row of seed[table]) {
+        if (row.includes('"id": "share-target"') || row.includes('"id": "request-actor-target"') || row.includes('"id": "request-recipient-target"') || row.includes('"id": "mention-collision-target"')) {
+          expect(after[table]).toContain(row);
+        }
+      }
+      expect(await transferLegacyOwnership({ client, sourceLogin: SOURCE_LOGIN, providerAccountId: ACCOUNT_ID, mode: "verify", transferId: applied.transferId ?? undefined })).toMatchObject({ verified: true, residualReferences: 0 });
+      await transferLegacyOwnership({ client, sourceLogin: SOURCE_LOGIN, providerAccountId: ACCOUNT_ID, mode: "rollback", transferId: applied.transferId ?? undefined });
+      const { ownership_transfer: _seedRecords, ...beforeRows } = seed;
+      const { ownership_transfer: _restoredRecords, ...restoredRows } = await snapshot(database);
+      expect(restoredRows).toEqual(beforeRows);
+    } finally {
+      await database.close();
     }
   }, 120_000);
 
@@ -260,6 +367,13 @@ describe("legacy ownership transfer", () => {
         hooks: {
           async afterMutations(hookClient) {
             await hookClient.query(`INSERT INTO version (id, document_id, number, content, created_by) VALUES ('late', 'doc-a', 99, '', $1)`, [SOURCE_ID]);
+          },
+        },
+      });
+      await refuse("RESIDUAL_REFERENCES", {
+        hooks: {
+          async afterMutations(hookClient) {
+            await hookClient.query(`UPDATE folder_notification SET ref_id = folder_id || ':' || $1 WHERE id = 'folder-note-move'`, [SOURCE_LOGIN]);
           },
         },
       });

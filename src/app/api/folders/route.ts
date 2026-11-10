@@ -17,6 +17,7 @@ function requireFullScope(scope: string | undefined): void {
 /** Folders the caller owns or can access, by name, each with how many live documents it holds. */
 export const GET = handler(async () => {
   const user = await requireUser();
+  if (user.documentIds?.length) throw new HttpError(403, "This token is restricted to other documents");
   return json({ folders: (await listFoldersForUser(user.id, user.login)).map(folderDto) });
 });
 
@@ -24,6 +25,7 @@ export const GET = handler(async () => {
 export const POST = handler(async (req: Request) => {
   const user = await requireUser();
   requireFullScope(user.scope);
+  if (user.documentIds?.length) throw new HttpError(403, "This token is restricted to other documents");
   const { name } = await readJson(req, (d) => body.parse(d));
   const result = await createFolder(user.id, name);
   if (result.outcome === "empty-name") throw new HttpError(400, "A folder needs a name");

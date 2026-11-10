@@ -281,7 +281,7 @@ export interface GitHubUserSummary {
 
 export interface UserSearchResult {
   users: GitHubUserSummary[];
-  /** GitHub refused the search (403/429 — the search API allows 30 calls a minute); the list is empty, not an error. */
+  /** GitHub refused the search (403/429); the empty list is unavailable, not a successful no-match result. */
   limited: boolean;
 }
 
@@ -301,9 +301,8 @@ function rateLimitResetIso(err: unknown): string | null {
 }
 
 /**
- * One warn line per minute per process when GitHub throttles the user search: the route answers
- * `limited: true` without logging (by design) and the Share dialog's autocomplete simply goes quiet,
- * so nothing else says so. No query text, login or token.
+ * One warn line per minute per process when GitHub throttles user search. The route answers
+ * `limited: true` and the picker shows retryable feedback. No query text, login or token.
  */
 function logUserSearchLimited(status: number, err: unknown): void {
   const now = Date.now();
@@ -316,12 +315,16 @@ function logUserSearchLimited(status: number, err: unknown): void {
 /**
  * GitHub accounts whose login matches `prefix`, for the Share dialog's handle autocomplete. Only
  * user accounts (an organization cannot sign in, so it can never be a collaborator). A rate-limited
- * search is reported as `limited` with no users so that adding by exact handle keeps working.
+ * search is reported as `limited`; a timed-out, incomplete search is a retryable failure, never a
+ * cacheable no-match result. Neither prevents adding by exact handle.
  */
 export async function searchUsers(octokit: Octokit, prefix: string): Promise<UserSearchResult> {
   if (isGitHubMock()) return { users: mockGithub.searchUsers(prefix), limited: false };
   try {
     const { data } = await octokit.search.users({ q: `${prefix} in:login type:user`, per_page: USER_SEARCH_LIMIT });
+    if (data.incomplete_results) {
+      throw new HttpError(503, "GitHub account search did not finish. Please try again.", undefined, { "Cache-Control": "no-store" });
+    }
     return {
       users: data.items.slice(0, USER_SEARCH_LIMIT).map((u) => ({ login: u.login, name: null, avatarUrl: u.avatar_url })),
       limited: false,

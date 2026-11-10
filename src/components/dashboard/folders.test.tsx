@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollaboratorDto, DocumentSummaryDto, FolderDto } from "@/lib/api";
 
 type ListResponse = { folders: FolderDto[] };
 type MoveResponse = { moved: string[] };
-type FolderPeople = { owner: { login: string | null; name: string | null; image: string | null } | null; collaborators: CollaboratorDto[] };
+type FolderPeople = { owner: { login: string | null; name: string | null; image: string | null } | null; collaborators: CollaboratorDto[]; linkAccess?: FolderDto["linkAccess"]; exceptions?: Record<string, import("@/server/folders").FolderAccessException[]> };
 
 const listFolders = vi.fn<() => Promise<ListResponse>>();
 const createFolder = vi.fn<(name: string) => Promise<{ folder: FolderDto }>>();
@@ -14,6 +14,8 @@ const deleteFolder = vi.fn<(id: string) => Promise<{ ok: true; trashed: number }
 const listFolderCollaborators = vi.fn<(id: string) => Promise<FolderPeople>>();
 const addFolderCollaborator = vi.fn<(id: string, login: string, role: "editor" | "commenter" | "viewer", options?: { change?: boolean }) => Promise<{ ok: true; login: string; role: string; pending: boolean }>>();
 const removeFolderCollaborator = vi.fn<(id: string, login: string) => Promise<{ ok: true }>>();
+const accessPreview = vi.fn();
+const updateLinkAccess = vi.fn();
 const moveDocuments = vi.fn<(ids: readonly string[], folderId: string | null) => Promise<MoveResponse>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
@@ -35,6 +37,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         move: (ids: readonly string[], folderId: string | null) => moveDocuments(ids, folderId),
       },
       folders: {
+        accessPreview: (...args: unknown[]) => accessPreview(...args),
+        updateLinkAccess: (...args: unknown[]) => updateLinkAccess(...args),
         list: () => listFolders(),
         create: (name: string) => createFolder(name),
         collaborators: (id: string) => listFolderCollaborators(id),
@@ -49,6 +53,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 const { Dashboard } = await import("./dashboard");
+const { FolderShareDialog } = await import("./folders");
 
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
 
@@ -91,6 +96,7 @@ function folder(id: string, name: string, documentCount = 0): FolderDto {
     ownerName: USER.name,
     ownerLogin: USER.login,
     role: "owner",
+    linkAccess: "private",
   };
 }
 
@@ -127,6 +133,8 @@ beforeEach(() => {
   listFolderCollaborators.mockReset().mockResolvedValue({ owner: null, collaborators: [] });
   addFolderCollaborator.mockReset().mockResolvedValue({ ok: true, login: "bob", role: "commenter", pending: false });
   removeFolderCollaborator.mockReset().mockResolvedValue({ ok: true });
+  accessPreview.mockReset().mockResolvedValue({ login: "bob", role: "commenter", exceptions: [] });
+  updateLinkAccess.mockReset().mockResolvedValue({ folder: folder("f1", "Recipes") });
   moveDocuments.mockReset();
   for (const fn of Object.values(router)) fn.mockReset();
 });
@@ -134,6 +142,250 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the folder rail", () => {
+  it("shows a retryable access-check failure and higher document access before and after saving a View folder grant", async () => {
+    const exception = { documentId: "budget", documentTitle: "Budget", role: "editor" as const, source: "collaborator" as const };
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Planning")] });
+    accessPreview.mockRejectedValueOnce(new Error("Access check unavailable")).mockResolvedValue({ exceptions: [exception] });
+    await mount([]);
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    expect(await screen.findByTestId("folder-share-warning")).toHaveTextContent("including documents added or moved into it later");
+    fireEvent.change(screen.getByRole("combobox", { name: "Role for new folder collaborator" }), { target: { value: "viewer" } });
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "carol" } });
+    expect(screen.getByTestId("folder-share-add")).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Retry access check" })).toBeVisible();
+    expect(addFolderCollaborator).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry access check" }));
+    expect(await screen.findByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Budget via direct document grant");
+    await waitFor(() => expect(screen.getByTestId("folder-share-add")).toBeEnabled());
+    listFolderCollaborators.mockResolvedValue({ owner: null, collaborators: [person("carol", "viewer")], exceptions: { carol: [exception] } });
+    addFolderCollaborator.mockResolvedValue({ ok: true, login: "carol", role: "viewer", pending: false });
+    fireEvent.click(screen.getByTestId("folder-share-add"));
+    await waitFor(() => expect(addFolderCollaborator).toHaveBeenCalledWith("f1", "carol", "viewer", undefined));
+    expect(await screen.findByText("@carol")).toBeVisible();
+    expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Folder grant: View for @carol");
+    expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Budget via direct document grant");
+  });
+
+  it("ignores an old person's access preview after changing the query", async () => {
+    let resolveOld!: (result: { exceptions: { documentId: string; documentTitle: string; role: string; source: string }[] }) => void;
+    accessPreview.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; })).mockResolvedValue({ exceptions: [] });
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Preview races")] });
+    await mount([]);
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Role for new folder collaborator" }), { target: { value: "viewer" } });
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "old-person" } });
+    await waitFor(() => expect(accessPreview).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "new-person" } });
+    expect(screen.getByTestId("folder-share-add")).toBeDisabled();
+    await waitFor(() => expect(screen.getByTestId("folder-share-add")).toBeEnabled());
+    await act(async () => resolveOld({ exceptions: [{ documentId: "old", documentTitle: "Old person's document", role: "editor", source: "link" }] }));
+    expect(screen.queryByText("Old person's document")).not.toBeInTheDocument();
+    expect(addFolderCollaborator).not.toHaveBeenCalled();
+  });
+
+  it("sets a usable folder link and reflects its persisted access option", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Linked folder")] });
+    await mount([]);
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    listFolderCollaborators.mockResolvedValue({ owner: null, collaborators: [], linkAccess: "edit" });
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: "edit" } });
+    await waitFor(() => expect(updateLinkAccess).toHaveBeenCalledWith("f1", "edit"));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toHaveValue("edit"));
+    expect(screen.getByTestId("folder-share-url")).toHaveTextContent("/f/f1");
+    expect(screen.getByText(/Signed-out visitors can only view/)).toBeVisible();
+  });
+
+  it.each([
+    { from: "private", to: "view" },
+    { from: "view", to: "private" },
+  ] as const)("keeps confirmed $from -> $to folder link access when its refresh fails, without repeating the mutation", async ({ from, to }) => {
+    const target = { ...folder("f1", "Confirmed link"), linkAccess: from };
+    const exception = { documentId: "budget", documentTitle: "Budget", role: "editor" as const, source: "collaborator" as const };
+    const people = { owner: { login: "owner", name: "Owner", image: null }, collaborators: [person("bob", "viewer")], exceptions: { bob: [exception] } };
+    let rejectRefresh!: (reason: Error) => void;
+    listFolders.mockResolvedValue({ folders: [target] });
+    listFolderCollaborators
+      .mockResolvedValueOnce({ ...people, linkAccess: from })
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }))
+      .mockResolvedValue({ ...people, linkAccess: to });
+    updateLinkAccess.mockResolvedValue({ folder: { ...target, linkAccess: to } });
+    await mount([]);
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: to } });
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("@bob")).toBeVisible();
+    expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Budget via direct document grant");
+    await act(async () => rejectRefresh(new Error("Folder access unavailable")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Folder access unavailable");
+    expect(screen.getByTestId("folder-link-access")).toHaveValue(to);
+    expect(screen.getByTestId("folder-link-access")).toBeDisabled();
+    expect(updateLinkAccess).toHaveBeenCalledExactlyOnceWith("f1", to);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    expect(screen.getByTestId("folder-link-access")).toHaveValue(to);
+    expect(screen.getByText("@bob")).toBeVisible();
+    expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Budget via direct document grant");
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByTestId("folder-share-dialog")).not.toBeInTheDocument());
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    expect(screen.getByTestId("folder-link-access")).toHaveValue(to);
+    expect(listFolderCollaborators).toHaveBeenCalledTimes(4);
+    expect(updateLinkAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the previous folder link setting when the PATCH fails", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Unchanged link")] });
+    listFolderCollaborators.mockResolvedValue({ owner: null, collaborators: [], linkAccess: "private" });
+    updateLinkAccess.mockRejectedValue(new Error("Link update unavailable"));
+    await mount([]);
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: "view" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Link update unavailable");
+    expect(screen.getByTestId("folder-link-access")).toHaveValue("private");
+    expect(screen.getByTestId("folder-link-access")).toBeEnabled();
+    expect(listFolderCollaborators).toHaveBeenCalledTimes(1);
+    expect(updateLinkAccess).toHaveBeenCalledExactlyOnceWith("f1", "view");
+  });
+
+  it("drops a confirmed link change after switching to another folder", async () => {
+    let finishPatch!: (result: { folder: FolderDto }) => void;
+    updateLinkAccess.mockImplementationOnce(() => new Promise((resolve) => { finishPatch = resolve; }));
+    listFolderCollaborators.mockImplementation(async (id) => ({
+      owner: null, collaborators: [], linkAccess: id === "f1" ? "private" : "comment",
+    }));
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<FolderShareDialog folder={folder("f1", "First")} onOpenChange={onOpenChange} />);
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: "edit" } });
+    await waitFor(() => expect(updateLinkAccess).toHaveBeenCalledExactlyOnceWith("f1", "edit"));
+    rerender(<FolderShareDialog folder={{ ...folder("f2", "Second"), linkAccess: "comment" }} onOpenChange={onOpenChange} />);
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toHaveValue("comment"));
+    await act(async () => finishPatch({ folder: { ...folder("f1", "First"), linkAccess: "edit" } }));
+    expect(screen.getByTestId("folder-link-access")).toHaveValue("comment");
+    expect(screen.getByTestId("folder-link-access")).toBeEnabled();
+    expect(listFolderCollaborators.mock.calls).toEqual([["f1"], ["f2"]]);
+  });
+
+  it.each([
+    { from: "private", to: "edit" },
+    { from: "edit", to: "private" },
+  ] as const)("ignores an older Add refresh after a confirmed $from -> $to link change", async ({ from, to }) => {
+    const target = { ...folder("f1", "Refresh ordering"), linkAccess: from };
+    const direct = { documentId: "budget", documentTitle: "Budget", role: "editor" as const, source: "collaborator" as const };
+    const inherited = { documentId: "roadmap", documentTitle: "Roadmap", role: "editor" as const, source: "folder-link" as const };
+    const people = { owner: null, collaborators: [person("bob", "viewer")] };
+    const old = { ...people, linkAccess: from, exceptions: { bob: from === "edit" ? [direct, inherited] : [direct] } };
+    const latest = { ...people, linkAccess: to, exceptions: { bob: to === "edit" ? [direct, inherited] : [direct] } };
+    let finishOld!: (result: FolderPeople) => void;
+    listFolderCollaborators.mockResolvedValueOnce({ owner: null, collaborators: [], linkAccess: from })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue(latest);
+    addFolderCollaborator.mockResolvedValue({ ok: true, login: "bob", role: "viewer", pending: false });
+    updateLinkAccess.mockResolvedValue({ folder: { ...target, linkAccess: to } });
+    render(<FolderShareDialog folder={target} onOpenChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    fireEvent.change(screen.getByRole("combobox", { name: "Role for new folder collaborator" }), { target: { value: "viewer" } });
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "bob" } });
+    await waitFor(() => expect(screen.getByTestId("folder-share-add")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("folder-share-add"));
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: to } });
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    expect(screen.getByTestId("folder-link-access")).toHaveValue(to);
+
+    await act(async () => finishOld(old));
+    expect(screen.getByTestId("folder-link-access")).toHaveValue(to);
+    expect(screen.getByText("@bob")).toBeVisible();
+    expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Budget via direct document grant");
+    if (to === "edit") expect(screen.getByTestId("folder-access-exceptions")).toHaveTextContent("Edit on Roadmap via folder link");
+    else expect(screen.queryByText("Roadmap")).not.toBeInTheDocument();
+    expect(addFolderCollaborator).toHaveBeenCalledExactlyOnceWith("f1", "bob", "viewer", undefined);
+    expect(updateLinkAccess).toHaveBeenCalledExactlyOnceWith("f1", to);
+  });
+
+  it.each(["success", "failure"] as const)("keeps the latest refresh error when an older Add refresh finishes with $0", async (outcome) => {
+    let finishOld!: () => void;
+    listFolderCollaborators.mockResolvedValueOnce({ owner: null, collaborators: [], linkAccess: "private" })
+      .mockImplementationOnce(() => new Promise((resolve, reject) => {
+        finishOld = () => outcome === "success"
+          ? resolve({ owner: null, collaborators: [person("bob", "editor")], linkAccess: "private" })
+          : reject(new Error("Obsolete access error"));
+      }))
+      .mockRejectedValueOnce(new Error("Latest access refresh unavailable"))
+      .mockResolvedValue({ owner: null, collaborators: [person("bob", "editor")], linkAccess: "view" });
+    updateLinkAccess.mockResolvedValue({ folder: { ...folder("f1", "Refresh errors"), linkAccess: "view" } });
+    render(<FolderShareDialog folder={folder("f1", "Refresh errors")} onOpenChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "bob" } });
+    fireEvent.click(screen.getByTestId("folder-share-add"));
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId("folder-link-access"), { target: { value: "view" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Latest access refresh unavailable");
+    await act(async () => finishOld());
+    expect(screen.getByRole("alert")).toHaveTextContent("Latest access refresh unavailable");
+    expect(screen.getByTestId("folder-link-access")).toHaveValue("view");
+    expect(screen.getByTestId("folder-link-access")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByTestId("folder-link-access")).toBeEnabled());
+    expect(screen.getByTestId("folder-link-access")).toHaveValue("view");
+    expect(screen.getByText("@bob")).toBeVisible();
+    expect(addFolderCollaborator).toHaveBeenCalledTimes(1);
+    expect(updateLinkAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["initial load", "Retry"] as const)("ignores an older $0 response after a newer collaborator refresh", async (load) => {
+    let finishOld!: (result: FolderPeople) => void;
+    if (load === "Retry") listFolderCollaborators.mockRejectedValueOnce(new Error("Initial access unavailable"));
+    listFolderCollaborators.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue({ owner: null, collaborators: [person("bob", "editor")], linkAccess: "view" });
+    render(<FolderShareDialog folder={folder("f1", "Load ordering")} onOpenChange={vi.fn()} />);
+    if (load === "Retry") fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(load === "Retry" ? 2 : 1));
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "bob" } });
+    fireEvent.click(screen.getByTestId("folder-share-add"));
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(load === "Retry" ? 3 : 2));
+    expect(await screen.findByText("@bob")).toBeVisible();
+    expect(screen.getByTestId("folder-link-access")).toBeEnabled();
+    await act(async () => finishOld({ owner: null, collaborators: [], linkAccess: "private" }));
+    expect(await screen.findByText("@bob")).toBeVisible();
+    expect(screen.getByTestId("folder-link-access")).toHaveValue("view");
+    expect(screen.getByTestId("folder-link-access")).toBeEnabled();
+    expect(addFolderCollaborator).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore a removed collaborator from an older Add refresh", async () => {
+    let finishOld!: (result: FolderPeople) => void;
+    listFolderCollaborators.mockResolvedValueOnce({ owner: null, collaborators: [person("bob", "viewer")], linkAccess: "private" })
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue({ owner: null, collaborators: [person("carol", "editor")], linkAccess: "private" });
+    addFolderCollaborator.mockResolvedValue({ ok: true, login: "carol", role: "editor", pending: false });
+    render(<FolderShareDialog folder={folder("f1", "Independent grants")} onOpenChange={vi.fn()} />);
+    await screen.findByText("@bob");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "carol" } });
+    fireEvent.click(screen.getByTestId("folder-share-add"));
+    await waitFor(() => expect(listFolderCollaborators).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Remove bob" }));
+    await waitFor(() => expect(screen.queryByText("@bob")).not.toBeInTheDocument());
+    await act(async () => finishOld({ owner: null, collaborators: [person("bob", "viewer"), person("carol", "editor")], linkAccess: "private" }));
+    expect(screen.queryByText("@bob")).not.toBeInTheDocument();
+    expect(await screen.findByText("@carol")).toBeVisible();
+    expect(addFolderCollaborator).toHaveBeenCalledExactlyOnceWith("f1", "carol", "editor", undefined);
+    expect(removeFolderCollaborator).toHaveBeenCalledExactlyOnceWith("f1", "bob");
+  });
+
   it("lists the folders with their counts", async () => {
     listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 2), folder("f2", "Travel", 0)] });
     await mount([doc("d1", "One")]);
@@ -174,9 +426,14 @@ describe("the folder rail", () => {
     expect(await screen.findByText("@bob")).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("combobox", { name: "Role for bob" }), { target: { value: "commenter" } });
+    expect(addFolderCollaborator).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save folder role" })).toBeEnabled());
+    listFolderCollaborators.mockResolvedValue({ owner: null, collaborators: [person("bob", "commenter")] });
+    fireEvent.click(screen.getByRole("button", { name: "Save folder role" }));
     await waitFor(() => expect(addFolderCollaborator).toHaveBeenCalledWith("f1", "bob", "commenter", { change: true }));
     expect(screen.getByRole("combobox", { name: "Role for bob" })).toHaveValue("commenter");
 
+    listFolderCollaborators.mockResolvedValue({ owner: null, collaborators: [] });
     fireEvent.click(screen.getByRole("button", { name: "Remove bob" }));
     await waitFor(() => expect(removeFolderCollaborator).toHaveBeenCalledWith("f1", "bob"));
     expect(screen.queryByText("@bob")).not.toBeInTheDocument();

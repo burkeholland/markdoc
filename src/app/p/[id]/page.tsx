@@ -8,6 +8,7 @@ import { renderReaderBody } from "@/server/export/reader-body-cache";
 import { ReaderPage } from "@/components/reader/reader-page";
 import { computeStats } from "@/editor/stats";
 import { UnrenderableDocumentError, UNRENDERABLE_MESSAGE } from "@/editor/markdown/renderable";
+import { shareReturnPath } from "@/lib/share-target";
 
 // Always render the latest text: the reader has no live connection, a refresh is the update.
 export const dynamic = "force-dynamic";
@@ -24,13 +25,15 @@ export async function generateMetadata({ params }: PageProps<"/p/[id]">): Promis
   return { ...(await documentMetadata(access?.doc ?? null, live, "/p")), robots: { index: false } };
 }
 
-export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">) {
+export default async function PublicReaderPage({ params, searchParams }: PageProps<"/p/[id]">) {
   const { id } = await params;
   const user = await currentUser();
   const access = await getEffectiveDocumentAccess(id, user);
+  const sharePath = shareReturnPath(`/d/${id}`, await searchParams);
+  const signInReturnPath = sharePath === `/d/${id}` ? undefined : sharePath;
   if (!access) {
     // Same behaviour as /d: signed-out visitors are sent to sign in, signed-in strangers see 404.
-    if (!user) redirect(`/login?next=${encodeURIComponent(`/p/${id}`)}`);
+    if (!user) redirect(`/login?next=${encodeURIComponent(signInReturnPath ?? `/p/${id}`)}`);
     notFound();
   }
   const { doc, role } = access;
@@ -54,6 +57,7 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
       readingMinutes={computeStats(live.clean).readingMinutes}
       owner={owner ? { name: owner.name ?? owner.login ?? "Owner", image: owner.image ?? null } : null}
       signedIn={!!user}
+      signInReturnPath={signInReturnPath}
       canOpenEditor={canComment(role)}
       pollMs={Number(process.env.READER_POLL_MS) || 30_000}
     />

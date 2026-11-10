@@ -7,6 +7,6 @@ export const GET = handler(async () => {
   const user = await requireUser();
   if (!user.login) return json({ items: [], unreadCount: 0, mentions: [] });
   const page = await listNotifications(user.login, { unread: true, kind: "mention" });
-  const items = page.items.filter((n) => tokenAllowsDocument(user, n.documentId)).map(toDto);
+  const items = page.items.filter((n) => n.resource !== "folder" && tokenAllowsDocument(user, n.documentId)).map(toDto);
   return json({ items, unreadCount: user.documentIds?.length ? items.length : page.unreadCount, mentions: items.map((n) => ({ ...n, commentId: n.refId, byLogin: n.actorLogin })) });
 });

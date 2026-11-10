@@ -8,6 +8,7 @@ import { publicDocument } from "@/server/dto";
 import { documentMetadata, liveTextForRequest } from "@/server/document-metadata";
 import { renderMarkdownBody } from "@/server/export/html";
 import { createAnonymousUserId } from "@/editor/collab/identity";
+import { shareReturnPath } from "@/lib/share-target";
 
 export const dynamic = "force-dynamic";
 
@@ -21,17 +22,17 @@ export async function generateMetadata({ params }: PageProps<"/d/[id]">): Promis
   return documentMetadata(access?.doc ?? null, live, "/d");
 }
 
-export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
+export default async function DocumentPage({ params, searchParams }: PageProps<"/d/[id]">) {
   const { id } = await params;
   const user = await currentUser();
   const embed = user?.embedDocumentId === id;
   const access = await getEffectiveDocumentAccess(id, user);
   if (!access) {
-    if (!user) redirect(`/login?next=${encodeURIComponent(`/d/${id}`)}`);
+    if (!user) redirect(`/login?next=${encodeURIComponent(shareReturnPath(`/d/${id}`, await searchParams))}`);
     notFound();
   }
   // A signed-out visitor on a view-only link cannot edit or comment: the reader page serves them better.
-  if (!user && access.doc.linkAccess === "view") redirect(`/p/${id}`);
+  if (!user && access.doc.linkAccess === "view") redirect(shareReturnPath(`/p/${id}`, await searchParams));
   const [githubAvailable, initialHtml] = await Promise.all([user ? getGitHubToken(user.id).then((t) => !!t) : false, renderInitialHtml(id)]);
   return (
     <EditorClient

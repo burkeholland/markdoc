@@ -2,7 +2,7 @@ import { and, eq, inArray, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { getDb, schema, type Db } from "@/server/db";
 import type { LinkAccess, Role } from "@/server/db/schema";
 
-export type AccessSource = "owner" | "collaborator" | "folder" | "link";
+export type AccessSource = "owner" | "collaborator" | "folder" | "link" | "folder-link";
 type CollaboratorRole = Exclude<Role, "owner">;
 
 export interface AccessDocument {
@@ -41,25 +41,29 @@ export function roleFromLink(linkAccess: LinkAccess, signedIn: boolean): Role | 
   }
 }
 
-/** The strongest explicit role wins; link access is the fallback, and direct access wins ties with folder access. */
+/** The strongest applicable grant wins. Direct grants win ties, followed by folder grants and links. */
 export function effectiveRole({
   owner,
   directRole,
   folderRole,
   linkRole,
+  folderLinkRole = null,
 }: {
   owner: boolean;
   directRole: CollaboratorRole | null;
   folderRole: CollaboratorRole | null;
   linkRole: Role | null;
+  folderLinkRole?: Role | null;
 }): EffectiveAccess | null {
   if (owner) return { role: "owner", source: "owner" };
 
   for (const role of ["editor", "commenter", "viewer"] as const) {
     if (directRole === role) return { role, source: "collaborator" };
     if (folderRole === role) return { role, source: "folder" };
+    if (linkRole === role) return { role, source: "link" };
+    if (folderLinkRole === role) return { role, source: "folder-link" };
   }
-  return linkRole ? { role: linkRole, source: "link" } : null;
+  return null;
 }
 
 /** Resolve the user's strongest role for a document whose metadata is already loaded. */
@@ -73,6 +77,9 @@ export async function effectiveRoleForDocument(
   const login = normalizeLogin(user?.login);
   let directRole: CollaboratorRole | null = null;
   let folderRole: CollaboratorRole | null = null;
+  const [folder] = doc.folderId
+    ? await database.select({ linkAccess: schema.folders.linkAccess }).from(schema.folders).where(eq(schema.folders.id, doc.folderId)).limit(1)
+    : [];
 
   if (login) {
     const [direct, folder] = await Promise.all([
@@ -98,6 +105,7 @@ export async function effectiveRoleForDocument(
     directRole,
     folderRole,
     linkRole: roleFromLink(doc.linkAccess, user !== null),
+    folderLinkRole: folder ? roleFromLink(folder.linkAccess, user !== null) : null,
   });
 }
 
@@ -107,13 +115,16 @@ export async function accessibleLoginsForDocument(docId: string, candidates: rea
   if (logins.length === 0) return new Set();
   const database = await getDb();
   const [doc] = await database
-    .select({ ownerId: schema.documents.ownerId, folderId: schema.documents.folderId, linkAccess: schema.documents.linkAccess })
+    .select({
+      ownerId: schema.documents.ownerId, folderId: schema.documents.folderId, linkAccess: schema.documents.linkAccess,
+      folderLinkAccess: sql<LinkAccess | null>`(select ${schema.folders.linkAccess} from ${schema.folders} where ${schema.folders.id} = ${schema.documents.folderId})`,
+    })
     .from(schema.documents)
     .where(and(eq(schema.documents.id, docId), sql`${schema.documents.deletedAt} is null`))
     .limit(1);
   if (!doc) return new Set();
   const linkRole = roleFromLink(doc.linkAccess, true);
-  if (linkRole) return new Set(logins);
+  if (linkRole || (doc.folderLinkAccess && roleFromLink(doc.folderLinkAccess, true))) return new Set(logins);
 
   const [ownerRows, directRows, folderRows] = await Promise.all([
     database
@@ -166,6 +177,7 @@ export function effectiveRoleSql(
   source: SQL<AccessSource | null>;
   directRole: SQL<CollaboratorRole | null>;
   folderRole: SQL<CollaboratorRole | null>;
+  folderLinkRole: SQL<Role | null>;
 } {
   const login = loginSql(user?.login ?? null);
   const owner =
@@ -207,27 +219,38 @@ export function effectiveRoleSql(
           end`
         : sql<Role | null>`case when ${doc.linkAccess} = 'private' then null else 'viewer' end`
       : sql<Role | null>`null`;
+  const folderLinkAccess = sql<LinkAccess | null>`(select ${schema.folders.linkAccess} from ${schema.folders} where ${schema.folders.id} = ${doc.folderId})`;
+  const folderLinkRole = !includeLink
+    ? sql<Role | null>`null`
+    : user?.signedIn
+      ? sql<Role | null>`case ${folderLinkAccess} when 'view' then 'viewer' when 'comment' then 'commenter' when 'edit' then 'editor' else null end`
+      : sql<Role | null>`case when ${folderLinkAccess} in ('view', 'comment', 'edit') then 'viewer' else null end`;
 
   const role = sql<Role | null>`case
     when ${owner} then 'owner'
-    when ${directRole} = 'editor' or ${folderRole} = 'editor' then 'editor'
-    when ${directRole} = 'commenter' or ${folderRole} = 'commenter' then 'commenter'
-    when ${directRole} = 'viewer' or ${folderRole} = 'viewer' then 'viewer'
-    else ${linkRole}
+    when ${directRole} = 'editor' or ${folderRole} = 'editor' or ${linkRole} = 'editor' or ${folderLinkRole} = 'editor' then 'editor'
+    when ${directRole} = 'commenter' or ${folderRole} = 'commenter' or ${linkRole} = 'commenter' or ${folderLinkRole} = 'commenter' then 'commenter'
+    when ${directRole} = 'viewer' or ${folderRole} = 'viewer' or ${linkRole} = 'viewer' or ${folderLinkRole} = 'viewer' then 'viewer'
+    else null
   end`;
   const source = sql<AccessSource | null>`case
     when ${owner} then 'owner'
     when ${directRole} = 'editor' then 'collaborator'
     when ${folderRole} = 'editor' then 'folder'
+    when ${linkRole} = 'editor' then 'link'
+    when ${folderLinkRole} = 'editor' then 'folder-link'
     when ${directRole} = 'commenter' then 'collaborator'
     when ${folderRole} = 'commenter' then 'folder'
+    when ${linkRole} = 'commenter' then 'link'
+    when ${folderLinkRole} = 'commenter' then 'folder-link'
     when ${directRole} = 'viewer' then 'collaborator'
     when ${folderRole} = 'viewer' then 'folder'
-    when ${linkRole} is not null then 'link'
+    when ${linkRole} = 'viewer' then 'link'
+    when ${folderLinkRole} = 'viewer' then 'folder-link'
     else null
   end`;
 
-  return { role, source, directRole, folderRole };
+  return { role, source, directRole, folderRole, folderLinkRole };
 }
 
 function normalizeLogin(login: string | null | undefined): string | null {

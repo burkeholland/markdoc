@@ -7,9 +7,12 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { FOLDER_NAME_MAX } from "@/lib/folder-name";
 import { cn } from "@/lib/utils";
-import type { Role } from "@/server/db/schema";
+import type { LinkAccess, Role } from "@/server/db/schema";
 import { Avatar } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
+import { FolderAccessExceptions, FolderPreviewFeedback, FOLDER_SHARE_WARNING, useFolderAccessPreview } from "./folder-access-preview";
+import { useCopy } from "@/lib/hooks";
+import { markNotificationReadConfirmed } from "@/lib/notifications-store";
 
 /**
  * The id of the folder being browsed, or one of the two pseudo-selections. `null` is "All documents"
@@ -486,7 +489,12 @@ function folderShareRefusal(error: unknown): string | null {
   return `@${login} already has access as ${label}. Change the role in the list below.`;
 }
 
-function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null; onOpenChange: (open: boolean) => void }) {
+export function FolderShareDialog({ folder, onOpenChange, accessRequest, onRequestResolved }: {
+  folder: FolderDto | null;
+  onOpenChange: (open: boolean) => void;
+  accessRequest?: { login: string; notificationId: string | null } | null;
+  onRequestResolved?: () => void;
+}) {
   const [people, setPeople] = React.useState<FolderPeople | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -497,13 +505,37 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
   const [addError, setAddError] = React.useState<string | null>(null);
   const [addNote, setAddNote] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const [requestError, setRequestError] = React.useState<string | null>(null);
+  const [requestBusy, setRequestBusy] = React.useState(false);
+  const resolvingRequest = React.useRef(false);
   const [busyLogins, setBusyLogins] = React.useState<ReadonlySet<string>>(new Set());
+  const [linkBusy, setLinkBusy] = React.useState(false);
+  const [origin, setOrigin] = React.useState("");
+  const [previewRevision, setPreviewRevision] = React.useState(0);
+  const { preview, retry: retryPreview } = useFolderAccessPreview(folder?.id ?? null, login, role, previewRevision);
+  const linkRef = React.useRef<HTMLElement>(null);
+  const folderUrl = folder ? `${origin}/f/${folder.id}` : "";
+  const { copy, label: copyLabel } = useCopy(folderUrl, linkRef, "Copy folder link");
   const roleSelect = React.useRef<HTMLSelectElement>(null);
   const loginInput = React.useRef<CollaboratorLoginInputHandle>(null);
   const currentFolder = React.useRef<string | null>(folder?.id ?? null);
+  // Loads, retries, and mutation refreshes share one response order.
+  const peopleRequest = React.useRef(0);
   const focusRole = React.useCallback(() => roleSelect.current?.focus(), []);
   const folderId = folder?.id ?? null;
+  const requestId = accessRequest?.notificationId ?? accessRequest?.login ?? null;
+  const currentRequest = React.useRef(requestId);
 
+  React.useEffect(() => setOrigin(window.location.origin), []);
+  React.useEffect(() => {
+    currentRequest.current = requestId;
+    setRequestError(null);
+  }, [folderId, requestId]);
+  React.useEffect(() => {
+    if (!folderId || !accessRequest) return;
+    setLogin(accessRequest.login);
+    setRole("viewer");
+  }, [folderId, accessRequest]);
   React.useEffect(() => {
     currentFolder.current = folder?.id ?? null;
   }, [folder?.id]);
@@ -511,20 +543,22 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
   React.useEffect(() => {
     if (!folderId) return;
     let stale = false;
+    const request = ++peopleRequest.current;
     setLoading(true);
     setLoadError(null);
     api.folders.collaborators(folderId).then(
       (result) => {
-        if (!stale) setPeople(result);
+        if (!stale && peopleRequest.current === request) setPeople(result);
       },
       (error: unknown) => {
-        if (!stale) setLoadError(apiErrorText(error, "Could not load folder access."));
+        if (!stale && peopleRequest.current === request) setLoadError(apiErrorText(error, "Could not load folder access."));
       },
     ).finally(() => {
-      if (!stale) setLoading(false);
+      if (!stale && peopleRequest.current === request) setLoading(false);
     });
     return () => {
       stale = true;
+      peopleRequest.current += 1;
     };
   }, [folderId, retry]);
 
@@ -538,11 +572,18 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
   }, []);
 
   const refresh = async (folderId: string) => {
+    const request = ++peopleRequest.current;
     try {
       const result = await api.folders.collaborators(folderId);
-      if (currentFolder.current === folderId) setPeople(result);
+      if (currentFolder.current === folderId && peopleRequest.current === request) {
+        setPeople(result);
+        setLoadError(null);
+        setPreviewRevision((value) => value + 1);
+      }
     } catch (error) {
-      if (currentFolder.current === folderId) setLoadError(apiErrorText(error, "Could not refresh folder access."));
+      if (currentFolder.current === folderId && peopleRequest.current === request) setLoadError(apiErrorText(error, "Could not refresh folder access."));
+    } finally {
+      if (currentFolder.current === folderId && peopleRequest.current === request) setLoading(false);
     }
   };
 
@@ -550,7 +591,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
     event.preventDefault();
     const target = folder;
     const handle = login.trim();
-    if (!target || !isValidLogin(handle) || adding) return;
+    if (!target || !isValidLogin(handle) || adding || linkBusy || preview?.status !== "loaded") return;
     setAdding(true);
     setAddError(null);
     setAddNote(null);
@@ -560,6 +601,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
       setLogin("");
       if (result.pending) setAddNote(`@${result.login} gets access on their first sign-in. Check the spelling.`);
       await refresh(target.id);
+      if (accessRequest?.login.replace(/^@/, "").toLowerCase() === result.login.toLowerCase()) await resolveRequest();
     } catch (error) {
       if (currentFolder.current !== target.id) return;
       setAddError(folderShareRefusal(error) ?? apiErrorText(error, "Could not share this folder."));
@@ -579,11 +621,51 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
         setPeople((current) =>
           current ? { ...current, collaborators: current.collaborators.map((item) => (item.login === person.login ? { ...item, role: next } : item)) } : current,
         );
+        await refresh(target.id);
       }
     } catch (error) {
       if (currentFolder.current === target.id) setActionError(apiErrorText(error, `Could not change ${person.login}'s role.`));
     } finally {
       setBusy(person.login, false);
+    }
+  };
+
+  const resolveRequest = async () => {
+    if (!folder || !accessRequest || resolvingRequest.current) return;
+    const targetId = folder.id;
+    const targetRequest = requestId;
+    resolvingRequest.current = true;
+    setRequestBusy(true);
+    setRequestError(null);
+    try {
+      if (accessRequest.notificationId && !(await markNotificationReadConfirmed(accessRequest.notificationId))) {
+        if (currentFolder.current === targetId && currentRequest.current === targetRequest) setRequestError("Could not dismiss this request. Try again.");
+        return;
+      }
+      if (currentFolder.current === targetId && currentRequest.current === targetRequest) onRequestResolved?.();
+    } catch (error) {
+      if (currentFolder.current === targetId && currentRequest.current === targetRequest) setRequestError(apiErrorText(error, "Could not dismiss this request. Try again."));
+    } finally {
+      resolvingRequest.current = false;
+      setRequestBusy(false);
+    }
+  };
+
+  const changeLink = async (value: LinkAccess) => {
+    const target = folder;
+    if (!target || linkBusy) return;
+    setLinkBusy(true);
+    setActionError(null);
+    try {
+      const { folder: saved } = await api.folders.updateLinkAccess(target.id, value);
+      if (currentFolder.current !== target.id) return;
+      setPeople((current) => current ? { ...current, linkAccess: saved.linkAccess } : current);
+      setPreviewRevision((revision) => revision + 1);
+      await refresh(target.id);
+    } catch (error) {
+      if (currentFolder.current === target.id) setActionError(apiErrorText(error, "Could not change folder link access."));
+    } finally {
+      setLinkBusy(false);
     }
   };
 
@@ -599,6 +681,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
         setPeople((current) =>
           current ? { ...current, collaborators: current.collaborators.filter((item) => item.login !== person.login) } : current,
         );
+        await refresh(target.id);
       }
     } catch (error) {
       if (currentFolder.current === target.id) setActionError(apiErrorText(error, `Could not remove ${person.login}.`));
@@ -612,11 +695,19 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
   return (
     <Dialog open={folder !== null} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`Share “${folder?.name ?? "folder"}”`}
+        title={`Share folder “${folder?.name ?? "folder"}”`}
         description="Everyone you add gets this role on every document in the folder, including new ones."
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
       >
         <div className="flex flex-col gap-4" data-testid="folder-share-dialog">
+          <p className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm text-ink-2" role="note" data-testid="folder-share-warning">{FOLDER_SHARE_WARNING}</p>
+          {accessRequest && (
+            <div className="rounded-lg border border-line px-3 py-2 text-sm" data-testid="folder-access-request">
+              <p>@{accessRequest.login} requested access to this folder. Review the folder scope and any higher document access before adding them.</p>
+              {requestError && <p className="mt-2 text-danger" role="alert">{requestError}</p>}
+              <button type="button" className="btn btn-outline btn-sm mt-2" disabled={requestBusy} onClick={() => void resolveRequest()}>{requestBusy ? "Dismissing…" : requestError ? "Retry dismissal" : "Dismiss request"}</button>
+            </div>
+          )}
           <form className="flex flex-wrap gap-2" onSubmit={(event) => void add(event)}>
             <div className="min-w-[12rem] flex-1 basis-full sm:basis-0">
               <CollaboratorLoginInput
@@ -636,10 +727,11 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
-            <button type="submit" className="btn btn-primary h-11 min-w-20 sm:h-9 sm:min-w-0" disabled={!isValidLogin(login) || adding} data-testid="folder-share-add">
+            <button type="submit" className="btn btn-primary h-11 min-w-20 sm:h-9 sm:min-w-0" disabled={!isValidLogin(login) || adding || linkBusy || preview?.status !== "loaded"} data-testid="folder-share-add">
               {adding ? "Adding…" : "Add"}
             </button>
           </form>
+          <FolderPreviewFeedback login={login} role={role} preview={preview} retry={retryPreview} />
           {addError && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">{addError}</p>}
           {addNote && <p className="text-xs text-ink-3" role="status">{addNote}</p>}
           <section aria-label="People with folder access">
@@ -668,18 +760,10 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-ink">{person.name ?? person.login}</div>
                       <div className="truncate text-xs text-ink-3">@{person.login}</div>
+                      <p className="text-xs text-ink-3">Folder grant: {FOLDER_ROLE_OPTIONS.find((option) => option.value === person.role)?.label}</p>
+                      <FolderAccessExceptions login={person.login} role={person.role} exceptions={people?.exceptions?.[person.login] ?? []} />
                     </div>
-                    <select
-                      className="select h-11 text-xs sm:h-8"
-                      value={person.role}
-                      aria-label={`Role for ${person.login}`}
-                      aria-disabled={busyLogins.has(person.login) || undefined}
-                      onChange={(event) => void changeRole(person, event.target.value as FolderRole)}
-                    >
-                      {FOLDER_ROLE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
+                    <FolderRoleEditor folderId={folderId} revision={previewRevision} person={person} busy={linkBusy || busyLogins.has(person.login)} onSave={(next) => changeRole(person, next)} />
                     <button
                       type="button"
                       className="icon-btn tap-target relative h-8 w-8 text-ink-3 hover:text-danger"
@@ -696,12 +780,54 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
             )}
             {actionError && <p className="mt-2 text-sm text-danger" role="alert">{actionError}</p>}
           </section>
+          <section aria-label="Folder link access" className="flex flex-col gap-2 border-t border-line pt-3">
+            <label className="text-sm font-medium text-ink" htmlFor={`folder-link-${folderId}`}>General access to this folder</label>
+            <select
+              id={`folder-link-${folderId}`}
+              className="select h-11"
+              value={people?.linkAccess ?? folder?.linkAccess ?? "private"}
+              disabled={linkBusy || loading || !!loadError}
+              onChange={(event) => void changeLink(event.target.value as LinkAccess)}
+              data-testid="folder-link-access"
+            >
+              <option value="private">Restricted</option>
+              <option value="view">Anyone with the link can view</option>
+              <option value="comment">Anyone with the link can comment</option>
+              <option value="edit">Anyone with the link can edit</option>
+            </select>
+            <p className="text-xs text-ink-3">Link access applies to every document in this folder. Signed-out visitors can only view. Existing higher grants are kept.</p>
+            <code ref={linkRef} className="truncate text-xs text-ink-2" data-testid="folder-share-url">{folderUrl}</code>
+            <button type="button" className="btn btn-outline self-start" onClick={copy} data-testid="folder-share-copy">{copyLabel}</button>
+          </section>
           <div className="flex justify-end">
             <button type="button" className="btn btn-primary h-11 tap-target relative sm:h-9" onClick={() => onOpenChange(false)}>Done</button>
           </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function FolderRoleEditor({ folderId, revision, person, busy, onSave }: {
+  folderId: string | null; revision: number; person: CollaboratorDto; busy: boolean; onSave: (role: FolderRole) => Promise<void>;
+}) {
+  const [draft, setDraft] = React.useState<FolderRole>(person.role);
+  const editing = draft !== person.role;
+  const { preview, retry } = useFolderAccessPreview(editing ? folderId : null, person.login, draft, revision);
+  return (
+    <div className="max-w-64">
+      <select className="select h-11 text-xs sm:h-8" value={editing ? draft : person.role} aria-label={`Role for ${person.login}`} disabled={busy}
+        onChange={(event) => setDraft(event.target.value as FolderRole)}>
+        {FOLDER_ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+      {editing && (
+        <div>
+          <FolderPreviewFeedback login={person.login} role={draft} preview={preview} retry={retry} />
+          <button type="button" className="btn btn-primary btn-sm mt-2" disabled={busy || preview?.status !== "loaded"} onClick={() => void onSave(draft)}>Save folder role</button>
+          <button type="button" className="btn btn-ghost btn-sm mt-2" disabled={busy} onClick={() => setDraft(person.role)}>Cancel</button>
+        </div>
+      )}
+    </div>
   );
 }
 

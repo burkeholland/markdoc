@@ -3,35 +3,38 @@
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { signOutSafely } from "@/lib/sign-out";
+import { shareReturnPath } from "@/lib/share-target";
 
 type Status = "idle" | "sending" | "sent" | "error";
 
 /**
- * What a signed-in visitor sees on `/d/<id>` they cannot open (issue #2400). Deliberately the same for a
- * missing document and one they lack access to: asking for access answers identically either way.
+ * The same unavailable-resource screen for missing and inaccessible documents or folders.
  */
-export function NoAccess() {
+export function NoAccess({ resource = "document" }: { resource?: "document" | "folder" }) {
   const pathname = usePathname() ?? "";
-  const id = /^\/d\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const id = (resource === "folder" ? /^\/f\/([^/]+)/ : /^\/d\/([^/]+)/).exec(pathname)?.[1] ?? null;
   const [status, setStatus] = useState<Status>("idle");
 
   const requestAccess = async () => {
     if (!id || status === "sending" || status === "sent") return;
     setStatus("sending");
     try {
-      const res = await fetch(`/api/documents/${id}/access-request`, { method: "POST" });
+      const res = await fetch(`/api/${resource === "folder" ? "folders" : "documents"}/${id}/access-request`, { method: "POST" });
       setStatus(res.ok ? "sent" : "error");
     } catch {
       setStatus("error");
     }
   };
 
-  const switchAccount = () => void signOutSafely(`/login?next=${encodeURIComponent(pathname)}`);
+  const switchAccount = () => {
+    const next = shareReturnPath(pathname, Object.fromEntries(new URL(window.location.href).searchParams));
+    void signOutSafely(`/login?next=${encodeURIComponent(next)}`);
+  };
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-surface-2 px-4 py-4 text-center" data-testid="no-access">
       <p className="text-xs font-semibold uppercase tracking-wider text-ink-3">No access</p>
-      <h1 className="mt-2 text-2xl font-semibold text-ink">You can&apos;t open this document</h1>
+      <h1 className="mt-2 text-2xl font-semibold text-ink">You can&apos;t open this {resource}</h1>
       <p className="mt-2 max-w-sm text-sm text-ink-3">
         It doesn&apos;t exist, or it hasn&apos;t been shared with you. Ask the owner for access, or switch to an account that has it.
       </p>
@@ -46,7 +49,7 @@ export function NoAccess() {
         </button>
       </div>
       <p className="mt-3 min-h-5 text-sm text-ink-3" role="status" data-testid="no-access-status">
-        {status === "sent" && "If this document exists, its owner has been notified."}
+        {status === "sent" && `If this ${resource} exists, its owner has been notified.`}
         {status === "error" && "Could not send the request. Try again."}
       </p>
       {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- keeps next/link out of the shared chunk (#1485) */}

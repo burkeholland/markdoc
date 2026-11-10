@@ -140,7 +140,8 @@ describe("an access change while the person types (issue #2281)", () => {
       res.statusCode = 404;
       res.end();
     });
-    attachCollab(server, hocuspocus, { path: "/collab" });
+    // Exercise the access-pause acknowledgement bound, not the lower transport flood threshold.
+    attachCollab(server, hocuspocus, { path: "/collab", floodLimits: { messageBurst: 10_000 } });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/collab`;
   });
@@ -505,8 +506,8 @@ describe("an access change while the person types (issue #2281)", () => {
   });
 
   describe("a person whose edit access really ends: nothing typed after the change is accepted", () => {
-    it("lowered to Viewer (an explicit row wins over an edit link): every waiting key is refused, in order, none applied", async () => {
-      const s = await scene();
+    it("lowered to Viewer without a stronger link: every waiting key is refused, in order, none applied", async () => {
+      const s = await scene({ link: "private" });
       s.personClient.type(" before");
       await eventually(() => s.serverText() === "Start before", "the key typed before the change");
       const change = setRow(s, "viewer");
@@ -556,7 +557,7 @@ describe("an access change while the person types (issue #2281)", () => {
     });
 
     it("a change that fails after its write went through: the connection gets the access the database has, not the one it had", async () => {
-      const s = await scene();
+      const s = await scene({ link: "private" });
       const change = slowChange(
         (mutation) => changeCollaboratorAccess(s.doc.id, s.login, "viewer", mutation),
         () => upsertCollaborator(s.doc.id, s.login, "viewer", s.owner.id),
@@ -718,9 +719,9 @@ describe("an access change while the person types (issue #2281)", () => {
   describe("lowered, then given edit back", () => {
     it.each([
       ["the role is set to Editor again", "role"],
-      ["the row is removed and the link gives edit", "row"],
+      ["the link is raised to Edit over the Viewer row", "link"],
     ])("nothing is accepted while lowered; once they can edit again all of it arrives and saving goes on: %s", async (_how, how) => {
-      const s = await scene({ row: null });
+      const s = await scene({ link: "private" });
       const lowered = setRow(s, "viewer");
       await lowered.written;
       lowered.finish();
@@ -737,7 +738,7 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(s.personClient.got.step1).toBe(1);
       expect(s.personClient.unsent()).toBe(3);
 
-      const raised = how === "role" ? setRow(s, "editor") : removeRow(s);
+      const raised = how === "role" ? setRow(s, "editor") : setLink(s, "edit");
       await raised.written;
       // Still a Viewer for the server until the change has ended: nothing arrives, nothing is asked for.
       expect(s.serverText()).toBe("Start");
@@ -760,7 +761,7 @@ describe("an access change while the person types (issue #2281)", () => {
     });
 
     it("the server asks for the missing part only when the connection can edit: Viewer to Commenter asks nothing", async () => {
-      const s = await scene({ row: null });
+      const s = await scene({ link: "private" });
       const lowered = setRow(s, "viewer");
       await lowered.written;
       lowered.finish();
@@ -787,7 +788,7 @@ describe("an access change while the person types (issue #2281)", () => {
     });
 
     it("a Viewer who typed nothing and is made an Editor is not asked for anything", async () => {
-      const s = await scene({ row: "viewer" });
+      const s = await scene({ link: "private", row: "viewer" });
       expect(s.connection.readOnly).toBe(true);
       const raised = setRow(s, "editor");
       await raised.written;
@@ -846,7 +847,7 @@ describe("an access change while the person types (issue #2281)", () => {
 
     it("a change that takes longer than the limit and ends the access: nothing is applied", async () => {
       authorization.HOLD_LIMITS.ms = 150;
-      const s = await scene();
+      const s = await scene({ link: "private" });
       const change = setRow(s, "viewer");
       await change.written;
       s.personClient.type(" one");
@@ -956,7 +957,7 @@ describe("an access change while the person types (issue #2281)", () => {
     });
 
     it("a save request from someone whose edit access ended while it waited is answered with \"no permission\"", async () => {
-      const s = await scene();
+      const s = await scene({ link: "private" });
       const change = setRow(s, "viewer");
       await change.written;
       s.personClient.provider.sendStateless(JSON.stringify({ type: "document-persistence-flush", docId: s.doc.id, requestId: "save-after-lowering" }));
@@ -974,7 +975,7 @@ describe("an access change while the person types (issue #2281)", () => {
     it("two changes for the same person queue up: each pause holds and releases on its own", async () => {
       const s = await scene();
       const first = removeRow(s);
-      const second = setRow(s, "viewer");
+      const second = setLink(s, "view");
       await first.written;
       expect(second.started()).toBe(false);
       s.personClient.type(" one");
@@ -1147,7 +1148,7 @@ describe("an access change while the person types (issue #2281)", () => {
 
   describe("what the page says while the server asks for the missing part", () => {
     it("typing on through lowered-then-raised: whenever the page says Saved, the stored document equals its text", async () => {
-      const s = await scene({ row: null });
+      const s = await scene({ link: "private" });
       const page = s.personClient;
       const wrong: string[] = [];
       const saidSaved = { editor: 0, lowered: 0, raised: 0 };
@@ -1194,7 +1195,7 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(lastStored.get(s.doc.id)).not.toContain("v1a");
 
       // Edit comes back while they keep typing: keys before the answer, with it, and after it.
-      const raised = removeRow(s);
+      const raised = setRow(s, "editor");
       page.type(" r0");
       look();
       await raised.written;
@@ -1263,7 +1264,7 @@ describe("an access change while the person types (issue #2281)", () => {
     it("more refused keys than the limit, then edit comes back: no more acknowledgements than the limit are sent, and all the text is in", async () => {
       const limit = authorization.HOLD_LIMITS.refused;
       const extra = 5_000;
-      const s = await scene({ row: null });
+      const s = await scene({ link: "private" });
       await setRole(s, "viewer");
       let typed = "";
       for (let i = 0; i < limit + extra; i += 1) {
@@ -1275,7 +1276,7 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(s.personClient.unsent()).toBe(limit + extra);
       const acknowledgedBefore = s.personClient.got.applied;
 
-      await setRole(s, null);
+      await setRole(s, "editor");
       // Past the limit the connection is still asked for everything: the text is in the live document, the
       // owner's copy and the stored row.
       await eventually(() => s.serverText() === `Start${typed}`, "the text typed while lowered", 20_000);
@@ -1324,7 +1325,7 @@ describe("an access change while the person types (issue #2281)", () => {
     });
 
     it("a person below the limit still gets the exact number: 150 keys refused while lowered, 150 acknowledgements, and the page ends at Saved", async () => {
-      const s = await scene({ row: null });
+      const s = await scene({ link: "private" });
       await setRole(s, "viewer");
       let typed = "";
       for (let i = 0; i < 150; i += 1) {
@@ -1334,7 +1335,7 @@ describe("an access change while the person types (issue #2281)", () => {
       }
       await eventually(() => s.personClient.got.refused === 150, "every key to be refused");
       const acknowledgedBefore = s.personClient.got.applied;
-      await setRole(s, null);
+      await setRole(s, "editor");
       await expectNothingLost(s, `Start${typed}`);
       expect(s.personClient.got.applied - acknowledgedBefore).toBe(150);
       await eventually(() => s.personClient.saveState() === "saved", "the page to say Saved");

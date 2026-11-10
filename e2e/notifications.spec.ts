@@ -191,7 +191,7 @@ test.describe("notifications", () => {
     const row = strip.getByTestId("notification-item");
     await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-kind", "share");
-    await expect(row).toContainText(`${alice.login} shared ‘Shared with Carol’ with you as commenter`);
+    await expect(row).toContainText(`${alice.login} shared document ‘Shared with Carol’ with you as commenter`);
 
     // Carol's own document: the bell shows the share too.
     const mine = await createDocument(carol.page, "# Carol's notes\n", "Carol's notes");
@@ -199,7 +199,7 @@ test.describe("notifications", () => {
     await expect(carol.page.getByTestId("notifications-badge")).toHaveText("1");
     await carol.page.getByTestId("notifications-bell").click();
     const popover = carol.page.getByTestId("notifications-popover");
-    await expect(popover.getByTestId("notification-item").first()).toContainText("shared ‘Shared with Carol’ with you");
+    await expect(popover.getByTestId("notification-item").first()).toContainText("shared document ‘Shared with Carol’ with you");
     await popover.getByTestId("notifications-read-all").click();
     await expect(carol.page.getByTestId("notifications-badge")).toHaveCount(0);
     await expect(popover.getByTestId("notification-unread-dot")).toHaveCount(0);

@@ -23,6 +23,7 @@ export const FIXTURE_TABLES = [
   "document",
   "folder",
   "folder_collaborator",
+  "folder_notification",
   "notification",
   "ownership_transfer",
   "recent",
@@ -66,6 +67,13 @@ export const FIXTURE_EXPECTED_DRY_RUN: Record<(typeof TRANSFER_COUNT_LABELS)[num
   "notification.user_login moved": 1,
   "notification.user_login deduplicated": 1,
   "notification.actor_login updated": 1,
+  "notification.actor_login deduplicated": 0,
+  "notification.ref_id updated": 0,
+  "folder_notification.user_login moved": 1,
+  "folder_notification.user_login deduplicated": 1,
+  "folder_notification.actor_login updated": 1,
+  "folder_notification.actor_login deduplicated": 0,
+  "folder_notification.ref_id updated": 2,
   "document.ystate identity metadata (not rewritten)": 1,
   "user deleted": 1,
 };
@@ -153,10 +161,18 @@ export async function seedLegacyOwnershipFixture(q: FixtureQuery): Promise<void>
   await q(
     `INSERT INTO notification (id, user_login, document_id, kind, actor_login, ref_id, snippet) VALUES
        ('note-move', $1, 'doc-o1', 'mention', 'other', 'thread-1', ''),
-       ('note-dup-source', $1, 'doc-o2', 'share', 'other', 'doc-o2', ''),
-       ('note-dup-target', $2, 'doc-o2', 'share', 'other', 'doc-o2', ''),
+       ('note-dup-source', $1, 'doc-o2', 'share', 'other', 'doc-o2:' || $1, ''),
+       ('note-dup-target', $2, 'doc-o2', 'share', 'other', 'doc-o2:' || $2, ''),
        ('note-actor', 'other', 'doc-o1', 'reply', $1, 'thread-2', ''),
        ('note-target', $2, 'doc-t1', 'mention', 'other', 'thread-3', '')`,
+    [sourceLogin, targetLogin],
+  );
+  await q(
+    `INSERT INTO folder_notification (id, user_login, folder_id, kind, actor_login, ref_id) VALUES
+       ('folder-note-move', $1, 'fold-other-move', 'share', 'other', 'fold-other-move:' || $1),
+       ('folder-note-dup-source', $1, 'fold-other', 'share', 'other', 'fold-other:' || $1),
+       ('folder-note-dup-target', $2, 'fold-other', 'share', 'other', 'fold-other:' || $2),
+       ('folder-note-actor', 'other', 'fold-legacy', 'access.request', $1, 'fold-legacy:' || $1)`,
     [sourceLogin, targetLogin],
   );
 }
