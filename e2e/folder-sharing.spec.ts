@@ -239,6 +239,95 @@ test("readable folder account switch preserves the exact Share request for its o
   expect(((await unchanged.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
 });
 
+for (const { linkAccess, signedIn } of [
+  { linkAccess: "view", signedIn: false },
+  { linkAccess: "comment", signedIn: false },
+  { linkAccess: "edit", signedIn: false },
+  { linkAccess: "view", signedIn: true },
+] as const) {
+  test(`inherited folder ${linkAccess} document request recovers the owner from signedIn=${signedIn} without granting access`, async ({ browser }) => {
+    const owner = await signIn(browser, uniqueLogin("inherited-owner"));
+    const requester = await signIn(browser, uniqueLogin("inherited-ask"));
+    const id = await createDocument(owner.page, "# Inherited request\n", "Inherited requested document");
+    const apiPath = `/api/documents/${id}`;
+    expect((await requester.page.request.post(`${apiPath}/access-request`)).status()).toBe(202);
+    const notifications = await owner.page.request.get("/api/notifications?kind=access.request");
+    const request = ((await notifications.json()) as { items: { id: string; documentId: string }[] }).items.find((item) => item.documentId === id)!;
+    expect(request).toBeTruthy();
+    const created = await owner.page.request.post("/api/folders", { data: { name: "Inherited request folder" } });
+    expect(created.ok()).toBeTruthy();
+    const { folder } = await created.json() as { folder: { id: string } };
+    expect((await owner.page.request.post("/api/documents/move", { data: { documentIds: [id], folderId: folder.id } })).ok()).toBeTruthy();
+    expect((await owner.page.request.patch(`/api/folders/${folder.id}`, { data: { linkAccess } })).ok()).toBeTruthy();
+
+    const page = signedIn
+      ? (await signIn(browser, uniqueLogin("inherited-other"))).page
+      : await (await browser.newContext()).newPage();
+    await page.goto(`/d/${id}`);
+    await expect(page.getByTestId("editor-shell")).toBeVisible();
+    await expect(page).toHaveURL((url) => url.pathname === `/d/${id}` && url.search === "");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    const access = await (await page.request.get(apiPath)).json();
+    expect(access).toMatchObject({ role: "viewer", document: { linkAccess: "private" } });
+    const query = `share=1&accessRequest=${requester.login}&notification=${request.id}`;
+    const path = `/d/${id}?${query}`;
+    const writes: string[] = [];
+    page.on("request", (networkRequest) => {
+      const target = new URL(networkRequest.url()).pathname;
+      if (networkRequest.method() !== "GET" && (target === apiPath || target === `${apiPath}/collaborators`
+        || target === `/api/folders/${folder.id}` || target === `/api/folders/${folder.id}/collaborators`
+        || target === `/api/notifications/${request.id}/read`)) writes.push(`${networkRequest.method()} ${target}`);
+    });
+    await page.goto(`${path}&redirect=https%3A%2F%2Funtrusted.example`);
+    const dialog = page.getByRole("dialog", { name: "Share document “Inherited requested document”" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(`@${requester.login} requested access to this document.`, { exact: true })).toBeVisible();
+    await expect(dialog.getByTestId("access-request-grant")).toHaveCount(0);
+    await expect(dialog.getByTestId("access-request-deny")).toHaveCount(0);
+    await expect(dialog.getByText("Only the document owner can respond to this request.")).toBeVisible();
+    if (signedIn) {
+      const switchAccount = dialog.getByRole("button", { name: "Switch account" });
+      await expect(switchAccount).toBeVisible();
+      const localDbNames = () => page.evaluate(async () => (await indexedDB.databases()).map(({ name }) => name ?? "").filter((name) => name.startsWith("markdoc:")));
+      await expect.poll(localDbNames).toContain(`markdoc:${id}`);
+      page.once("dialog", async (confirmation) => {
+        expect(confirmation.message()).toContain("changes that have not finished syncing will be permanently lost");
+        await confirmation.dismiss();
+      });
+      await switchAccount.click();
+      await expect(dialog).toBeVisible();
+      expect(await localDbNames()).toContain(`markdoc:${id}`);
+      expect((await page.request.get("/api/me")).status()).toBe(200);
+      page.once("dialog", async (confirmation) => {
+        expect(confirmation.message()).toContain("changes that have not finished syncing will be permanently lost");
+        await confirmation.accept();
+      });
+      await switchAccount.click();
+      await expect(page).toHaveURL((url) => url.pathname === "/api/auth/signout" && url.searchParams.get("callbackUrl") === `/login?next=${encodeURIComponent(path)}`);
+      expect(await localDbNames()).toEqual([]);
+      expect(await page.evaluate(() => localStorage.getItem("markdoc:idb-docs"))).toBeNull();
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    } else {
+      const signInLink = dialog.getByRole("link", { name: "Sign in as owner" });
+      await expect(signInLink).toHaveAttribute("href", `/login?next=${encodeURIComponent(path)}`);
+      await signInLink.click();
+    }
+    await expect(page).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("next") === path);
+    await waitForHydration(page);
+    await page.getByTestId("dev-login").fill(owner.login);
+    await page.getByTestId("dev-login-submit").click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(`@${requester.login} requested access to this document.`, { exact: true })).toBeVisible();
+    await expect(dialog.getByTestId("access-request-grant")).toBeEnabled();
+    expect(new URL(page.url()).pathname).toBe(`/d/${id}`);
+    expect(writes).toEqual([]);
+    expect((await (await owner.page.request.get(`${apiPath}/collaborators`)).json()).collaborators).toEqual([]);
+    expect((await (await owner.page.request.get(`/api/folders/${folder.id}/collaborators`)).json()).collaborators).toEqual([]);
+    const unchanged = await owner.page.request.get("/api/notifications?kind=access.request");
+    expect(((await unchanged.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
+  });
+}
+
 for (const resolution of ["dismiss", "grant"] as const) {
   test(`direct folder request ${resolution} survives a failed read write and stays resolved after retry and reload`, async ({ browser }, testInfo) => {
     const owner = await signIn(browser, uniqueLogin("dismiss-owner"));

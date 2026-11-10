@@ -7,6 +7,9 @@ import { ShareDialog } from "./share-dialog";
 import { ApiError, api, type CollaboratorDto } from "@/lib/api";
 import { COPY_FALLBACK_HINT, copyText } from "@/lib/clipboard";
 import type { DocumentDto } from "@/server/dto";
+import { signOutSafely } from "@/lib/sign-out";
+
+vi.mock("@/lib/sign-out", () => ({ signOutSafely: vi.fn() }));
 
 vi.mock("@/lib/clipboard", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/clipboard")>();
@@ -62,6 +65,7 @@ function renderShare({
   open = true,
   document = doc(),
   isOwner = true,
+  signedIn = true,
   onOpenChange = vi.fn(),
   onDocChange = vi.fn(),
   onConnectAgent,
@@ -70,6 +74,7 @@ function renderShare({
   open?: boolean;
   document?: DocumentDto;
   isOwner?: boolean;
+  signedIn?: boolean;
   onOpenChange?: (open: boolean) => void;
   onDocChange?: (document: DocumentDto) => void;
   onConnectAgent?: () => void;
@@ -84,6 +89,7 @@ function renderShare({
         onOpenChange={onOpenChange}
         doc={document}
         isOwner={isOwner}
+        signedIn={signedIn}
         onDocChange={onDocChange}
         onConnectAgent={onConnectAgent}
         accessRequest={accessRequest}
@@ -103,6 +109,8 @@ async function fillLogin(value: string) {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
+  vi.mocked(signOutSafely).mockReset().mockResolvedValue(true);
   vi.spyOn(api.github, "searchUsers").mockResolvedValue({ users: [], limited: false });
   vi.spyOn(api.documents, "collaborators").mockResolvedValue(people());
   vi.spyOn(api.documents, "addCollaborator").mockResolvedValue({ ok: true, login: "added", role: "editor", pending: false });
@@ -128,6 +136,8 @@ describe("ShareDialog", () => {
       expect(screen.getByText("Zoe Example (@zoe) requested access to this document.")).toBeInTheDocument();
       expect(screen.getByText("Adds a View grant on this document only. Higher access from other grants is kept.")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Deny request" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Sign in as owner" })).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Grant view access" })).toBeInTheDocument();
       expect(screen.queryByTestId("share-presentation")).not.toBeInTheDocument();
       expect(api.documents.collaborators).not.toHaveBeenCalled();
@@ -224,6 +234,29 @@ describe("ShareDialog", () => {
       expect(screen.queryByTestId("access-request-grant")).not.toBeInTheDocument();
       expect(screen.queryByTestId("access-request-deny")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    it("offers a bounded sign-in return for an anonymous request after the editor consumes the URL context", () => {
+      window.history.replaceState(null, "", "/d/doc-1?share=1&redirect=https%3A%2F%2Funtrusted.example");
+      renderShare({ accessRequest: request, isOwner: false, signedIn: false });
+      expect(screen.getByRole("link", { name: "Sign in as owner" })).toHaveAttribute("href", "/login?next=%2Fd%2Fdoc-1%3Fshare%3D1%26accessRequest%3Dzoe%26notification%3Drequest-one");
+      expect(screen.queryByRole("button", { name: "Switch account" })).not.toBeInTheDocument();
+      expect(api.documents.collaborators).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])("delegates wrong-account request recovery to safe sign-out, including confirmation=%s, without granting or reading", async (confirmed) => {
+      vi.mocked(signOutSafely).mockResolvedValue(confirmed);
+      window.history.replaceState(null, "", "/d/doc-1?share=1&redirect=https%3A%2F%2Funtrusted.example");
+      renderShare({ accessRequest: request, isOwner: false, signedIn: true });
+      expect(signOutSafely).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
+      await waitFor(() => expect(signOutSafely).toHaveBeenCalledExactlyOnceWith("/login?next=%2Fd%2Fdoc-1%3Fshare%3D1%26accessRequest%3Dzoe%26notification%3Drequest-one"));
+      expect(screen.getByRole("dialog", { name: "Share document “Launch Plan”" })).toBeVisible();
+      expect(api.documents.collaborators).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
       expect(notifications.markNotificationRead).not.toHaveBeenCalled();
     });
   });

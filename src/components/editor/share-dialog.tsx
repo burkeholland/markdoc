@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import Link from "next/link";
 import { BookOpen, Bot, Check, ChevronRight, Copy, Folder, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -10,6 +11,8 @@ import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
 import { markNotificationReadConfirmed } from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
+import { shareReturnPath } from "@/lib/share-target";
+import { signOutSafely } from "@/lib/sign-out";
 
 type CollaboratorRole = Exclude<Role, "owner">;
 type LinkAccess = DocumentDto["linkAccess"];
@@ -88,6 +91,7 @@ type ShareDialogProps = {
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
   isOwner: boolean;
+  signedIn?: boolean;
   onDocChange: (doc: DocumentDto) => void;
   /** Shows the "Connect an AI agent" row; called once Share has closed. */
   onConnectAgent?: () => void;
@@ -105,6 +109,7 @@ export const ShareDialogContent = memo(function ShareDialogContent({
   onOpenChange,
   doc,
   isOwner,
+  signedIn = true,
   onDocChange,
   onConnectAgent,
   accessRequest,
@@ -336,6 +341,11 @@ export const ShareDialogContent = memo(function ShareDialogContent({
   const requestName = accessRequest?.name?.trim();
   const requestLabel = requestName ? `${requestName} (@${requestLogin})` : `@${requestLogin}`;
   const validRequestLogin = Boolean(accessRequest && isValidLogin(requestLogin));
+  const requestSignInHref = `/login?next=${encodeURIComponent(shareReturnPath(`/d/${doc.id}`, {
+    share: "1",
+    accessRequest: accessRequest?.login,
+    notification: accessRequest?.notificationId ?? undefined,
+  }))}`;
   const excluded = [...(owner?.login ? [owner.login] : []), ...collaborators.map((c) => c.login)];
   // The role comes from the person's row when it is listed, so the sentence and the row below never disagree.
   const refusedRole = refused ? (collaborators.find((c) => c.login === refused.login)?.role ?? refused.role) : null;
@@ -367,7 +377,12 @@ export const ShareDialogContent = memo(function ShareDialogContent({
             <p className="text-sm text-ink-2">Adds a View grant on this document only. Higher access from other grants is kept.</p>
             {!validRequestLogin && <div className={ERROR_CLASS} role="alert">This request does not include a valid GitHub handle.</div>}
             {requestError && <div className={ERROR_CLASS} role="alert" data-testid="access-request-error">{requestError}</div>}
-            {!isOwner && <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>}
+            {!isOwner && <div className="space-y-3">
+              <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>
+              {signedIn
+                ? <button type="button" className="btn btn-outline btn-sm" onClick={() => void signOutSafely(requestSignInHref)}>Switch account</button>
+                : <Link className="btn btn-outline btn-sm" href={requestSignInHref}>Sign in as owner</Link>}
+            </div>}
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               {isOwner ? (
                 <>
