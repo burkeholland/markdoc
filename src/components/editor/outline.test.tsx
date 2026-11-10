@@ -281,6 +281,11 @@ describe("OutlinePanel active heading reveal", () => {
   });
 
   it("does not reveal an empty, closed, or newly opened outline", async () => {
+    // The hint needs the document's text to be in: an outline is not known to be empty before that.
+    const pending = render(<OutlinePanel session={session} open onToggle={() => {}} onSelect={() => {}} />);
+    expect(screen.queryByText("Headings you add will show up here.")).toBeNull();
+    pending.unmount();
+    Object.defineProperty(session, "contentReady", { configurable: true, get: () => true });
     const rendered = render(<OutlinePanel session={session} open onToggle={() => {}} onSelect={() => {}} />);
     expect(screen.getByText("Headings you add will show up here.")).toBeVisible();
     expect(scrollIntoView).not.toHaveBeenCalled();

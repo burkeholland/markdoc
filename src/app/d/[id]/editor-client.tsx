@@ -3,24 +3,9 @@
 import dynamic from "next/dynamic";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { EditorShellProps } from "@/components/editor/editor-shell";
-import { cn } from "@/lib/utils";
-import {
-  CODE_COLUMN_BOX,
-  CODE_COLUMN_SPLIT,
-  HEADER_BOX,
-  MAIN_BOX,
-  PANE_LABEL_ROW_BOX,
-  PANES_BOX,
-  RAIL_BOX,
-  RAIL_COLLAPSED_BOX,
-  RICH_COLUMN_BOX,
-  RICH_COLUMN_SPLIT,
-  RICH_PLACEHOLDER_BOX,
-  RICH_SCROLLER_BOX,
-  SHELL_BOX,
-  STATUS_BOX,
-  TOOLBAR_BOX,
-} from "@/components/editor/chrome-classes";
+import { loadEditorShell } from "@/components/editor/load-editor";
+import { EditorChrome } from "@/components/editor/editor-chrome";
+import { RICH_PLACEHOLDER_BOX } from "@/components/editor/chrome-classes";
 
 /**
  * The editor stack (ProseMirror, Yjs, micromark, Radix, the shell itself — 8 chunks, ≈ 925 kB) loads
@@ -35,12 +20,8 @@ import {
 const PreviewContext = createContext<string | null>(null);
 
 /**
- * Chrome of the shell's exact outer boxes (`chrome-classes.ts`), phone-correct by itself so nothing moves
- * when the shell takes over: the outline rail is absent below `md` (the shell's phone drawer), the 40 px
- * collapsed strip from `md` to `lg` (the shell closes the rail below `TABLET_MAX`, `editor-shell.tsx`
- * l.≈212) and the open 224 px rail from `lg`; the code column is hidden below `md` like the shell's
- * `split` layout. Landmarks match the shell (`<header>`, `<main id="editor-main">`, `<footer>`); nothing
- * in here is focusable, and the preview is `inert` like the shell's own stand-in.
+ * The shell's chrome (`EditorChrome`: its exact outer boxes and landmarks, see `editor-chrome.tsx`) around
+ * the preview, which is `inert` like the shell's own stand-in.
  */
 function EditorPlaceholder() {
   const initialHtml = useContext(PreviewContext);
@@ -52,31 +33,32 @@ function EditorPlaceholder() {
       <p className="sr-only" role="status" aria-live="polite" data-testid="editor-loading-status">
         {status}
       </p>
-      <div className={SHELL_BOX} data-testid="editor-loading" aria-busy="true">
-        <header className={HEADER_BOX} />
-        <div className={TOOLBAR_BOX} />
-        <main id="editor-main" className={MAIN_BOX}>
-          <div className={cn(RAIL_COLLAPSED_BOX, "max-md:hidden lg:hidden")} />
-          <div className={cn(RAIL_BOX, "max-lg:hidden")} />
-          <div className={PANES_BOX}>
-            <div className={cn(CODE_COLUMN_BOX, CODE_COLUMN_SPLIT, "max-md:hidden")} />
-            <div className={cn(RICH_COLUMN_BOX, RICH_COLUMN_SPLIT)}>
-              <div className={PANE_LABEL_ROW_BOX}>
-                <span className="pane-label">Preview</span>
-              </div>
-              <div className={RICH_SCROLLER_BOX}>
-                {initialHtml && <div className={RICH_PLACEHOLDER_BOX} data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />}
-              </div>
-            </div>
-          </div>
-        </main>
-        <footer className={STATUS_BOX} />
-      </div>
+      <EditorChrome data-testid="editor-loading" aria-busy>
+        {initialHtml && <div className={RICH_PLACEHOLDER_BOX} data-testid="rich-placeholder" aria-hidden="true" inert dangerouslySetInnerHTML={{ __html: initialHtml }} />}
+      </EditorChrome>
     </>
   );
 }
 
-const EditorShell = dynamic(() => import("@/components/editor/editor-shell").then((m) => m.EditorShell), { ssr: false, loading: EditorPlaceholder });
+/**
+ * On a phone-width screen the shell waits for one paint. When its module is already in memory (the
+ * dashboard fetched it, `warm-editor.ts`) React would otherwise render the shell in the same pass as the
+ * page, and on a phone that first render takes over a second during which nothing is on screen; with the
+ * wait the preview is painted first, as on a cold load. Wider screens render the shell in ≈ 0.1 s, so there
+ * it stays one step. The timer covers a tab that is not visible, where no frame is ever painted.
+ */
+function afterFirstPaint<T>(value: T): T | Promise<T> {
+  if (window.matchMedia("(min-width: 768px)").matches) return value;
+  return new Promise<T>((resolve) => {
+    const done = () => resolve(value);
+    requestAnimationFrame(() => setTimeout(done, 0));
+    setTimeout(done, 200);
+  });
+}
+
+// `loadEditorShell` is the shell's one `import()`: the dashboard calls it ahead of the first open
+// (`warm-editor.ts`), and then this resolves from memory and, on a desktop, the placeholder is never painted.
+const EditorShell = dynamic(() => loadEditorShell().then((m) => afterFirstPaint(m.EditorShell)), { ssr: false, loading: EditorPlaceholder });
 
 export function EditorClient(props: EditorShellProps) {
   // A stable host keeps the swapped-in shell where the placeholder was. Without it React appends the shell

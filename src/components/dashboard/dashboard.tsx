@@ -42,6 +42,8 @@ import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-p
 import { buildDashboardCommands } from "@/components/editor/commands";
 import { signOutSafely } from "@/lib/sign-out";
 import { DocumentShareDialog } from "./document-share-dialog";
+import { warmEditorWhenIdle } from "./warm-editor";
+import { OpeningDocument } from "./opening-document";
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -385,6 +387,8 @@ function StorageBadge({ doc }: { doc: Doc }) {
 
 export function Dashboard({ user, documents: initialDocuments, githubAvailable, githubConfigured, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
   const router = useRouter();
+  // Production only, like Next's own link prefetch: in development it would compile the editor on every dashboard load.
+  useEffect(() => (process.env.NODE_ENV === "production" ? warmEditorWhenIdle() : undefined), []);
   const [accountOpen, setAccountOpen] = useState(false);
   // ArrowDown/ArrowUp on the closed account trigger open the menu on its first/last item.
   const accountFocusOnOpen = useRef<"first" | "last" | null>(null);
@@ -1602,6 +1606,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       className="flex h-full flex-col gap-1 rounded-xl border border-line bg-surface px-3 py-2.5 pr-9 shadow-sm transition hover:border-accent hover:shadow-md"
                       data-testid="starred-card"
                     >
+                      <OpeningDocument />
                       <span className="line-clamp-2 break-words text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
                       <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                     </Link>
@@ -1780,6 +1785,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     )}
                     data-testid="document-card"
                   >
+                    <OpeningDocument />
                     {/* `pr-8` on an own-document card keeps the storage badge clear of the ⋮ menu. */}
                     <div className={cn("mb-2 flex items-start justify-between gap-2", canFile(d) && "pr-8")}>
                       <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">

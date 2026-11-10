@@ -59,6 +59,8 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   const headings = hydrated ? liveHeadings : EMPTY_HEADINGS;
   // Only the active index matters: the panel re-renders when the caret crosses a heading, not per keystroke.
   const active = useSessionValue(session, (s) => activeHeadingIndex(headings, s.cursorSource));
+  // "No headings" is only known once the document's text is in; before that the hint flashed on every open.
+  const contentReady = useSessionValue(session, (s) => s.contentReady);
 
   if (!open) {
     return (
@@ -82,7 +84,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
       </div>
       <nav className="scrollbar-thin flex-1 overflow-y-auto pb-6 pr-2" aria-label="Document outline">
         <OutlineList headings={headings} active={active} onSelect={onSelect} />
-        {hydrated && headings.length === 0 && <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>}
+        {hydrated && contentReady && headings.length === 0 && <p className="px-6 pt-1 text-[13px] leading-5 text-ink-4">Headings you add will show up here.</p>}
       </nav>
     </aside>
   );

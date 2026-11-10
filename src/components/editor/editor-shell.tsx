@@ -45,6 +45,7 @@ import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
 import { focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
+import { loadCodePane } from "./load-editor";
 // Not on demand: the bar must be mounted and focused inside the Mod-F keydown, or the keys typed while
 // its chunk loads go into the document.
 import { FindBar } from "./find-bar";
@@ -76,7 +77,7 @@ function SidePanelPlaceholder({ title }: { title: string }) {
 // the desktop paints the rich pane before the request completes (#1121). `actions.ts` and `scroll-sync.ts`
 // get their CodeMirror values from the pane through `onReady(view, api)`, so nothing else in this graph
 // imports `@codemirror/*` as a value.
-const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
+const CodePane = dynamic(() => loadCodePane().then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
 
 // Also on demand (#1150): the side panels, the dialogs, the command palette and the file-drop
 // dialog are UI nobody sees on a cold load, so each module is a `next/dynamic` boundary fetched on first use
@@ -3467,7 +3468,7 @@ export function EditorShell({
               <>
                 {/* `layout` (not `shownLayout`): before hydration it is always "split", so the phone's first paint already
                     hides the code column and the rich column's `flex-1 basis-0` fills the width, as after hydration (#1470). */}
-                <div ref={codeColumnRef} className={cn(CODE_COLUMN_BOX, showRich ? CODE_COLUMN_SPLIT : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
+                <div ref={codeColumnRef} className={cn(CODE_COLUMN_BOX, showRich ? CODE_COLUMN_SPLIT : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column" data-content-pending={!richHasContent || undefined}>
                   {showLoading && showRichPlaceholder && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                       Loading…
