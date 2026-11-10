@@ -87,3 +87,54 @@ for (const resource of ["document", "folder"] as const) {
     await expect.poll(async () => (await requester.page.request.get(apiPath)).status()).toBe(200);
   });
 }
+
+test("public folder sign-in preserves the exact Share request without granting access", async ({ browser }) => {
+  const owner = await signIn(browser, uniqueLogin("public-request-owner"));
+  const requester = await signIn(browser, uniqueLogin("public-request-reader"));
+  const created = await owner.page.request.post("/api/folders", { data: { name: "Public requested folder" } });
+  expect(created.ok()).toBeTruthy();
+  const { folder } = await created.json() as { folder: { id: string } };
+  const documentId = await createDocument(owner.page, "# Public request fixture\n", "Request budget");
+  expect((await owner.page.request.post("/api/documents/move", { data: { documentIds: [documentId], folderId: folder.id } })).ok()).toBeTruthy();
+  const apiPath = `/api/folders/${folder.id}`;
+  expect((await requester.page.request.post(`${apiPath}/access-request`)).status()).toBe(202);
+  const notifications = await owner.page.request.get("/api/notifications?kind=access.request");
+  const request = ((await notifications.json()) as { items: { id: string; folderId: string }[] }).items.find((item) => item.folderId === folder.id)!;
+  expect(request).toBeTruthy();
+  expect((await owner.page.request.patch(apiPath, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+
+  const fresh = await browser.newContext();
+  const page = await fresh.newPage();
+  const path = `/f/${folder.id}?share=1&accessRequest=${requester.login}&notification=${request.id}`;
+  const response = await page.goto(`${path}&redirect=https%3A%2F%2Funtrusted.example`);
+  expect(response?.status()).toBe(200);
+  await waitForHydration(page);
+  await expect(page.getByRole("heading", { name: "Public requested folder" })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("folder-page-share")).toHaveCount(0);
+  expect((await (await page.request.get(`/api/documents/${documentId}`)).json()).role).toBe("viewer");
+  const signInLink = page.getByRole("link", { name: "Sign in to comment or edit when allowed" });
+  await expect(signInLink).toHaveAttribute("href", `/login?next=${encodeURIComponent(path)}`);
+  const permissionWrites: string[] = [];
+  page.on("request", (request) => {
+    const target = new URL(request.url()).pathname;
+    if (request.method() !== "GET" && (target === apiPath || target === `${apiPath}/collaborators`)) permissionWrites.push(`${request.method()} ${target}`);
+  });
+  await signInLink.click();
+  await expect(page).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("next") === path);
+  await waitForHydration(page);
+  await page.getByTestId("dev-login").fill(owner.login);
+  await page.getByTestId("dev-login-submit").click();
+  const dialog = page.getByRole("dialog", { name: "Share folder “Public requested folder”" });
+  await expect(dialog).toBeVisible();
+  await expect(page).toHaveURL((url) => `${url.pathname}${url.search}` === path);
+  await expect(dialog.getByTestId("folder-access-request")).toContainText(`@${requester.login} requested access to this folder`);
+  await expect(dialog.getByTestId("share-login")).toHaveValue(requester.login);
+  await expect(dialog.getByRole("combobox", { name: "Role for new folder collaborator" })).toHaveValue("viewer");
+  await expect(dialog.getByTestId("folder-share-warning")).toContainText("added or moved into it later");
+  await expect(dialog.getByTestId("folder-share-add")).toBeEnabled();
+  expect(permissionWrites).toEqual([]);
+  expect((await (await owner.page.request.get(`${apiPath}/collaborators`)).json()).collaborators).toEqual([]);
+  const unchanged = await owner.page.request.get("/api/notifications?kind=access.request");
+  expect(((await unchanged.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
+});

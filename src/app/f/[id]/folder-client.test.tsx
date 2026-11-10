@@ -28,7 +28,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it("opens the selected document's existing Share pane rather than the folder's, without navigating or granting access", async () => {
-  render(<FolderPageClient folder={folder} documents={documents} signedIn initialShare={false} requestLogin={null} notificationId={null} />);
+  render(<FolderPageClient folder={folder} documents={documents} signedIn signInReturnPath="/f/planning" initialShare={false} requestLogin={null} notificationId={null} />);
   const location = window.location.href;
   fireEvent.pointerDown(screen.getByRole("button", { name: "Actions for Schedule" }), { button: 0, ctrlKey: false });
   fireEvent.click(within(screen.getByRole("menu")).getByTestId("document-share"));
@@ -43,7 +43,7 @@ it("opens the selected document's existing Share pane rather than the folder's, 
 });
 
 it("does not offer document management actions to a folder visitor with edit access", () => {
-  render(<FolderPageClient folder={{ ...folder, role: "editor" }} documents={documents.map((document) => ({ ...document, role: "editor" }))} signedIn initialShare={false} requestLogin={null} notificationId={null} />);
+  render(<FolderPageClient folder={{ ...folder, role: "editor" }} documents={documents.map((document) => ({ ...document, role: "editor" }))} signedIn signInReturnPath="/f/planning" initialShare={false} requestLogin={null} notificationId={null} />);
   expect(screen.queryByTestId("document-menu")).not.toBeInTheDocument();
   expect(screen.queryByTestId("folder-page-share")).not.toBeInTheDocument();
   expect(api.documents.get).not.toHaveBeenCalled();

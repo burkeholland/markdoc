@@ -11,10 +11,10 @@ import { isValidLogin } from "@/components/editor/collaborator-login-input";
 import { DocumentShareDialog } from "@/components/dashboard/document-share-dialog";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
 
-export function FolderPageClient({ folder, documents, signedIn, initialShare, requestLogin, notificationId }: {
+export function FolderPageClient({ folder, documents, signedIn, signInReturnPath, initialShare, requestLogin, notificationId }: {
   folder: FolderDto;
   documents: { id: string; title: string; role: Role | null; updatedAt: string }[];
-  signedIn: boolean; initialShare: boolean; requestLogin: string | null; notificationId: string | null;
+  signedIn: boolean; signInReturnPath: string; initialShare: boolean; requestLogin: string | null; notificationId: string | null;
 }) {
   const owner = folder.role === "owner";
   const [sharing, setSharing] = useState(initialShare && owner);
@@ -62,7 +62,7 @@ export function FolderPageClient({ folder, documents, signedIn, initialShare, re
       </ul>
       <nav className="mt-5 text-sm">
         {signedIn ? <Link href="/" className="text-accent hover:underline">Back to Documents</Link>
-          : <Link href={`/login?next=${encodeURIComponent(`/f/${folder.id}`)}`} className="text-accent hover:underline">Sign in to comment or edit when allowed</Link>}
+          : <Link href={`/login?next=${encodeURIComponent(signInReturnPath)}`} className="text-accent hover:underline">Sign in to comment or edit when allowed</Link>}
       </nav>
       <FolderShareDialog folder={sharing ? folder : null} onOpenChange={changeOpen} accessRequest={request} onRequestResolved={() => setRequest(null)} />
       {sharingDocument && <DocumentShareDialog key={sharingDocument.id} target={sharingDocument} onOpenChange={(open) => { if (!open) setSharingDocument(null); }} />}
