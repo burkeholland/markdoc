@@ -34,8 +34,9 @@ import { Header, type ExportFormat } from "./header";
 import { Toolbar } from "./toolbar";
 import { OutlinePanel } from "./outline";
 import { RichPane } from "./rich-pane";
-import { PreviewFontSelect } from "./preview-font-select";
+import { PreviewMenu } from "./preview-menu";
 import { previewFontStore } from "@/lib/preview-font";
+import { previewCodeWrapStore } from "@/lib/preview-code-wrap";
 import { StatusBar, type Layout } from "./status-bar";
 import type { VersionPreview } from "./versions-panel";
 import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
@@ -3156,6 +3157,7 @@ export function EditorShell({
   const contentReady = useSessionValue(session, (s) => s.localLoaded || s.synced);
   const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const previewFont = useSyncExternalStore(previewFontStore.subscribe, previewFontStore.getSnapshot, previewFontStore.getServerSnapshot);
+  const previewCodeWrap = useSyncExternalStore(previewCodeWrapStore.subscribe, previewCodeWrapStore.getSnapshot, previewCodeWrapStore.getServerSnapshot);
   // The rich pane holds the live text once the local copy or the server state put something in
   // it and the binding has rebuilt the ProseMirror document from it (the rebuild is coalesced
   // while the document loads and its parse runs in a task of its own, see MarkdownBinding.holdRemoteSync)
@@ -3503,11 +3505,11 @@ export function EditorShell({
                     onConnectAgent={openConnectAgent}
                   />
                 </div>
-                <div className={cn(RICH_COLUMN_BOX, showCode ? RICH_COLUMN_SPLIT : "flex-1", !showRich && "hidden")} data-testid="rich-column" data-preview-font={previewFont}>
-                  <div className={PANE_LABEL_ROW_BOX}>
+                <div className={cn(RICH_COLUMN_BOX, showCode ? RICH_COLUMN_SPLIT : "flex-1", !showRich && "hidden")} data-testid="rich-column" data-preview-font={previewFont} data-wrap-code={previewCodeWrap}>
+                  <div className={cn(PANE_LABEL_ROW_BOX, "preview-toolbar")} data-testid="preview-toolbar">
                     <span className="pane-label">{viewingOnly ? "Preview" : "Preview"}</span>
                     <div className="flex items-center gap-1">
-                    <PreviewFontSelect />
+                    <PreviewMenu />
                     <Tip label={viewingOnly ? "Switch to editing" : "View only"}>
                       <button
                         type="button"
