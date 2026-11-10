@@ -23,7 +23,7 @@ const { GET: LIST_FOLDERS, POST: CREATE_FOLDER } = await import("./route");
 const { GET: PREVIEW } = await import("./[id]/access-preview/route");
 const { POST: REQUEST_ACCESS } = await import("./[id]/access-request/route");
 const { GET: NOTIFICATIONS } = await import("@/app/api/notifications/route");
-const { markNotificationRead, notificationBelongsTo, markAllNotificationsRead, notify, listNotifications } = await import("@/server/notifications");
+const { markNotificationRead, notificationBelongsTo, markAllNotificationsRead, notify, listNotifications, unreadCount } = await import("@/server/notifications");
 const { getFolderAccess, setFolderLinkAccess } = await import("@/server/folders");
 
 let sequence = 0;
@@ -152,6 +152,56 @@ describe("folder collaborator routes", () => {
     expect((await listNotifications(requester.login)).items).toContainEqual(expect.objectContaining({ resource: "folder", folderId: id, kind: "share" }));
     await removeCollaborator(id, requester.login);
     expect(await listNotifications(requester.login)).toMatchObject({ items: [], unreadCount: 0 });
+  });
+
+  it("applies a token's document boundary before notification limits and unread counts, excluding newer folder and out-of-scope notices", async () => {
+    const owner = await makeUser();
+    const other = await makeUser();
+    const folderId = await makeFolder(owner.id);
+    const included = await createDocument({ ownerId: owner.id, title: "Scoped notification target" });
+    const outside = await createDocument({ ownerId: owner.id, title: "Out-of-scope notification target" });
+    const empty = await createDocument({ ownerId: owner.id, title: "No notifications" });
+    const db = await getDb();
+    await db.insert(schema.notifications).values([
+      ...Array.from({ length: 3 }, (_, i) => ({
+        id: `${included.id}-unread-${i}`, userLogin: owner.login, documentId: included.id, kind: "reply" as const,
+        refId: `eligible-${i}`, createdAt: new Date(`2026-01-01T00:00:0${i}Z`),
+      })),
+      { id: `${included.id}-read`, userLogin: owner.login, documentId: included.id, kind: "reply", refId: "already-read", createdAt: new Date("2026-01-02"), readAt: new Date("2026-01-03") },
+      { id: `${included.id}-other-recipient`, userLogin: other.login, documentId: included.id, kind: "reply", refId: "other-recipient", createdAt: new Date("2028-01-01") },
+      ...Array.from({ length: 21 }, (_, i) => ({
+        id: `${outside.id}-${i}`, userLogin: owner.login, documentId: outside.id, kind: "reply" as const,
+        refId: `outside-${i}`, createdAt: new Date("2026-02-01"),
+      })),
+    ]);
+    await db.insert(schema.folderNotifications).values(Array.from({ length: 21 }, (_, i) => ({
+      id: `${folderId}-${i}`, userLogin: owner.login, folderId, kind: "access.request" as const,
+      actorLogin: `requester-${i}`, refId: `${folderId}:requester-${i}`, createdAt: new Date("2027-01-01"),
+    })));
+    actor = owner;
+    const session = await (await NOTIFICATIONS(new Request("http://localhost:3700/api/notifications?unread=1"))).json();
+    expect(session.items).toHaveLength(20);
+    expect(session.items.every((item: { resource: string }) => item.resource === "folder")).toBe(true);
+    expect(session.unreadCount).toBe(45);
+    expect(await listNotifications(owner.login, { unread: true, limit: 2, documentIds: [included.id] })).toMatchObject({ items: [{ documentId: included.id }, { documentId: included.id }], unreadCount: 3 });
+    expect(await unreadCount(owner.login, "reply", [included.id])).toBe(3);
+    expect(await listNotifications(owner.login, { documentIds: [] })).toEqual({ items: [], unreadCount: 0 });
+    const token = (await createApiToken(owner.id, "Scoped notifications", { documentIds: [included.id] })).token;
+    requestHeaders = new Headers({ authorization: `Bearer ${token}` });
+    for (const [query, expectedLength] of [["unread=1", 3], ["unread=1&limit=2", 2], ["unread=1&limit=1&kind=reply", 1]] as const) {
+      const response = await NOTIFICATIONS(new Request(`http://localhost:3700/api/notifications?${query}`));
+      expect(response.status).toBe(200);
+      const page = await response.json();
+      expect(page.items).toHaveLength(expectedLength);
+      expect(page.items.every((item: { documentId: string; resource: string; readAt: string | null }) => item.documentId === included.id && item.resource !== "folder" && item.readAt === null)).toBe(true);
+      expect(page.unreadCount).toBe(3);
+      expect(JSON.stringify(page)).not.toContain(outside.title);
+    }
+    const readPage = await (await NOTIFICATIONS(new Request("http://localhost:3700/api/notifications?limit=1"))).json();
+    expect(readPage).toMatchObject({ items: [{ documentId: included.id, readAt: expect.any(String) }], unreadCount: 3 });
+    expect(await (await NOTIFICATIONS(new Request("http://localhost:3700/api/notifications?kind=access.request"))).json()).toEqual({ items: [], unreadCount: 0 });
+    requestHeaders = new Headers({ authorization: `Bearer ${(await createApiToken(owner.id, "Empty notification scope", { documentIds: [empty.id] })).token}` });
+    expect(await (await NOTIFICATIONS(new Request("http://localhost:3700/api/notifications"))).json()).toEqual({ items: [], unreadCount: 0 });
   });
 
   it("allows an owner to share, list, and remove a folder collaborator", async () => {

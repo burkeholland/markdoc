@@ -10,6 +10,7 @@ import type { Role } from "@/server/db/schema";
 import { isValidLogin } from "@/components/editor/collaborator-login-input";
 import { DocumentShareDialog } from "@/components/dashboard/document-share-dialog";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
+import { signOutSafely } from "@/lib/sign-out";
 
 export function FolderPageClient({ folder, documents, signedIn, signInReturnPath, initialShare, requestLogin, notificationId }: {
   folder: FolderDto;
@@ -38,7 +39,10 @@ export function FolderPageClient({ folder, documents, signedIn, signInReturnPath
         </div>
         {owner && <button className="btn btn-primary shrink-0 gap-2" onClick={() => changeOpen(true)} data-testid="folder-page-share"><Share2 size={16} />Share folder</button>}
       </header>
-      {initialShare && !owner && <p className="mb-4 text-sm text-danger" role="alert">Only the folder owner can open its Share pane or respond to access requests.</p>}
+      {initialShare && !owner && <div className="mb-4 space-y-3" role="alert">
+        <p className="text-sm text-danger">Only the folder owner can open its Share pane or respond to access requests.</p>
+        {signedIn && <button type="button" className="btn btn-outline btn-sm" onClick={() => void signOutSafely(`/login?next=${encodeURIComponent(signInReturnPath)}`)}>Switch account</button>}
+      </div>}
       {requestLogin && !isValidLogin(requestLogin) && <p className="mb-4 text-sm text-danger" role="alert">This access request does not include a valid GitHub handle.</p>}
       {owner && <p className="mb-4 rounded-lg border border-line bg-surface-2 p-3 text-sm text-ink-2">{FOLDER_SHARE_WARNING}</p>}
       <ul className="divide-y divide-line rounded-xl border border-line" aria-label="Documents in this folder">

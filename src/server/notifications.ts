@@ -189,10 +189,12 @@ const visibleFolderNotificationWhere = (login: string) => {
 };
 
 /** The user's notifications, newest first, plus their total unread count. */
-export async function listNotifications(login: string, opts: { unread?: boolean; limit?: number; kind?: NotificationKind } = {}): Promise<NotificationPage> {
+export async function listNotifications(login: string, opts: { unread?: boolean; limit?: number; kind?: NotificationKind; documentIds?: string[] | null } = {}): Promise<NotificationPage> {
+  if (opts.documentIds && opts.documentIds.length === 0) return { items: [], unreadCount: 0 };
   const db = await getDb();
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
   const conds = [userWhere(login), visibleNotificationWhere(login)];
+  if (opts.documentIds) conds.push(inArray(schema.notifications.documentId, opts.documentIds));
   if (opts.unread) conds.push(isNull(schema.notifications.readAt));
   if (opts.kind) conds.push(eq(schema.notifications.kind, opts.kind));
   const items = await db
@@ -217,7 +219,7 @@ export async function listNotifications(login: string, opts: { unread?: boolean;
   const folderConds = [folderUserWhere(login), visibleFolderNotificationWhere(login)];
   if (opts.unread) folderConds.push(isNull(schema.folderNotifications.readAt));
   if (opts.kind) folderConds.push(sql`${schema.folderNotifications.kind} = ${opts.kind}`);
-  const folderItems = await db.select({
+  const folderItems = opts.documentIds ? [] : await db.select({
     id: schema.folderNotifications.id, kind: schema.folderNotifications.kind,
     folderId: schema.folderNotifications.folderId, folderName: schema.folders.name,
     actorLogin: schema.folderNotifications.actorLogin, actorName: schema.folderNotifications.actorName,
@@ -229,18 +231,21 @@ export async function listNotifications(login: string, opts: { unread?: boolean;
     ...item, resource: "folder" as const, documentId: null, documentTitle: null, agentTargets: null,
   }))];
   merged.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id));
-  return { items: merged.slice(0, limit), unreadCount: await unreadCount(login, opts.kind) };
+  return { items: merged.slice(0, limit), unreadCount: await unreadCount(login, opts.kind, opts.documentIds) };
 }
 
-export async function unreadCount(login: string, kind?: NotificationKind): Promise<number> {
+export async function unreadCount(login: string, kind?: NotificationKind, documentIds?: string[] | null): Promise<number> {
+  if (documentIds && documentIds.length === 0) return 0;
   const db = await getDb();
   const conds = [userWhere(login), isNull(schema.notifications.readAt), visibleNotificationWhere(login)];
+  if (documentIds) conds.push(inArray(schema.notifications.documentId, documentIds));
   if (kind) conds.push(eq(schema.notifications.kind, kind));
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(schema.notifications)
     .innerJoin(schema.documents, eq(schema.documents.id, schema.notifications.documentId))
     .where(and(...conds));
+  if (documentIds) return row?.n ?? 0;
   const [folderRow] = await db.select({ n: sql<number>`count(*)::int` })
     .from(schema.folderNotifications).innerJoin(schema.folders, eq(schema.folders.id, schema.folderNotifications.folderId))
     .where(and(folderUserWhere(login), isNull(schema.folderNotifications.readAt), visibleFolderNotificationWhere(login),

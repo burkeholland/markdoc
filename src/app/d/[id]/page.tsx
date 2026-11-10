@@ -32,7 +32,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps<"
     notFound();
   }
   // A signed-out visitor on a view-only link cannot edit or comment: the reader page serves them better.
-  if (!user && access.doc.linkAccess === "view") redirect(`/p/${id}`);
+  if (!user && access.doc.linkAccess === "view") redirect(shareReturnPath(`/p/${id}`, await searchParams));
   const [githubAvailable, initialHtml] = await Promise.all([user ? getGitHubToken(user.id).then((t) => !!t) : false, renderInitialHtml(id)]);
   return (
     <EditorClient

@@ -25,13 +25,15 @@ export interface ReaderPageProps {
   readingMinutes?: number;
   owner: { name: string; image: string | null } | null;
   signedIn: boolean;
+  signInReturnPath?: string;
   canOpenEditor: boolean;
   pollMs: number;
 }
 
 /** Read-only presentation of a document: minimal chrome, the article, and a table of contents. */
-export function ReaderPage({ docId, title, html, headings, initialHash, updatedAt, readingMinutes = 0, owner, signedIn, canOpenEditor, pollMs }: ReaderPageProps) {
+export function ReaderPage({ docId, title, html, headings, initialHash, updatedAt, readingMinutes = 0, owner, signedIn, signInReturnPath, canOpenEditor, pollMs }: ReaderPageProps) {
   const toc = headings.filter((h) => h.level === 2 || h.level === 3);
+  const signInHref = signInReturnPath ? `/login?next=${encodeURIComponent(signInReturnPath)}` : "/login";
   // Titles usually come from the first h1; do not show it twice.
   const hideFirstH1 = headings[0]?.level === 1 && headings[0].text.trim() === title.trim() && html.startsWith("<h1 ");
   return (
@@ -42,7 +44,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
         Skip to article
       </a>
       <header className="reader-chrome sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface/90 px-4 backdrop-blur" data-testid="reader-header">
-        <Link href={signedIn ? "/" : "/login"} className="icon-btn h-9 w-9 shrink-0 tap-target relative" aria-label={signedIn ? "All documents" : "Sign in to Markdoc"}>
+        <Link href={signedIn ? "/" : signInHref} className="icon-btn h-9 w-9 shrink-0 tap-target relative" aria-label={signedIn ? "All documents" : "Sign in to Markdoc"}>
           <Logo className="h-7 w-7" />
         </Link>
         <a
@@ -107,7 +109,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
           <ReaderLinkCards contentKey={initialHash} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
             Made with{" "}
-            <Link href={signedIn ? "/" : "/login"} className="font-medium text-ink-3 hover:text-accent">
+            <Link href={signedIn ? "/" : signInHref} className="font-medium text-ink-3 hover:text-accent">
               Markdoc
             </Link>
           </footer>

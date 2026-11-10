@@ -4,6 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, type FolderDto } from "@/lib/api";
 import { FolderPageClient } from "./folder-client";
 import { FolderShareDialog } from "@/components/dashboard/folders";
+import { signOutSafely } from "@/lib/sign-out";
+
+vi.mock("@/lib/sign-out", () => ({ signOutSafely: vi.fn() }));
 
 const folder: FolderDto = {
   id: "planning", name: "Planning", ownerId: "owner", ownerName: "Owner", ownerLogin: "owner", role: "owner", linkAccess: "private",
@@ -14,6 +17,7 @@ const documents = [
   { id: "schedule", title: "Schedule", role: "owner" as const, updatedAt: folder.updatedAt },
 ];
 beforeEach(() => {
+  vi.mocked(signOutSafely).mockReset().mockResolvedValue(true);
   vi.spyOn(api.documents, "get").mockResolvedValue({
     document: {
       id: "schedule", title: "Schedule", ownerId: "owner", storage: "local", linkAccess: "private", linkPreview: true,
@@ -48,6 +52,22 @@ it("does not offer document management actions to a folder visitor with edit acc
   expect(screen.queryByTestId("document-menu")).not.toBeInTheDocument();
   expect(screen.queryByTestId("folder-page-share")).not.toBeInTheDocument();
   expect(api.documents.get).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("delegates a readable folder request's account switch to safe sign-out, including cancellation=%s, without granting or dismissing", async (cancelled) => {
+  vi.mocked(signOutSafely).mockResolvedValue(!cancelled);
+  vi.spyOn(api.notifications, "read");
+  vi.spyOn(api.folders, "addCollaborator");
+  const path = "/f/planning?share=1&accessRequest=alice&notification=request-alice";
+  render(<FolderPageClient folder={{ ...folder, role: "viewer", linkAccess: "view" }} documents={[]} signedIn signInReturnPath={path} initialShare requestLogin="alice" notificationId="request-alice" />);
+  expect(screen.getByRole("alert")).toHaveTextContent("Only the folder owner");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(signOutSafely).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
+  await waitFor(() => expect(signOutSafely).toHaveBeenCalledExactlyOnceWith(`/login?next=${encodeURIComponent(path)}`));
+  expect(api.notifications.read).not.toHaveBeenCalled();
+  expect(api.folders.addCollaborator).not.toHaveBeenCalled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Only the folder owner");
 });
 
 it("keeps a direct folder-page request visible after a failed read write and dismisses only after a confirmed retry", async () => {

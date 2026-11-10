@@ -61,6 +61,15 @@ afterEach(() => {
 });
 
 describe("ReaderPage header title link", () => {
+  it.each([false, true])("preserves a Share authentication destination in both signed-out links, without changing signedIn=%s navigation", (signedIn) => {
+    const signInReturnPath = "/d/doc-3518?share=1&accessRequest=alice&notification=request-alice";
+    renderReader({ signedIn, signInReturnPath });
+    const href = signedIn ? "/" : `/login?next=${encodeURIComponent(signInReturnPath)}`;
+    expect(within(screen.getByTestId("reader-header")).getByRole("link", { name: signedIn ? "All documents" : "Sign in to Markdoc" })).toHaveAttribute("href", href);
+    expect(within(screen.getByTestId("reader-article")).getByRole("link", { name: "Markdoc" })).toHaveAttribute("href", href);
+    expect(screen.queryByTestId("open-in-editor")).not.toBeInTheDocument();
+  });
+
   it.each([
     { signedIn: false, canOpenEditor: false, logoName: "Sign in to Markdoc", logoHref: "/login" },
     { signedIn: false, canOpenEditor: true, logoName: "Sign in to Markdoc", logoHref: "/login" },
