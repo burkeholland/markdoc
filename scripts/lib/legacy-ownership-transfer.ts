@@ -57,6 +57,8 @@ export const TRANSFER_LOGIN_REFERENCES = [
   "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
+  "folder_notification.user_login",
+  "folder_notification.actor_login",
 ] as const;
 
 export const TRANSFER_COUNT_LABELS = [
@@ -87,6 +89,9 @@ export const TRANSFER_COUNT_LABELS = [
   "notification.user_login moved",
   "notification.user_login deduplicated",
   "notification.actor_login updated",
+  "folder_notification.user_login moved",
+  "folder_notification.user_login deduplicated",
+  "folder_notification.actor_login updated",
   "document.ystate identity metadata (not rewritten)",
   "user deleted",
 ] as const;
@@ -766,25 +771,27 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
       deletedFolderCollaborators.add(folderCollaboratorKey(folderId, login));
     }
 
-    const notifications = await client.query<{ row: Row; id: string; kind: string; ref_id: string; user_login: string }>(
-      `SELECT to_jsonb(n) AS row, n.id, n.kind, n.ref_id, n.user_login FROM notification n WHERE lower(btrim(n.user_login)) = $1 ORDER BY n.id`,
-      [sourceLogin],
-    );
-    for (const { row, id, kind, ref_id: refId, user_login: userLogin } of notifications.rows) {
-      const duplicate = await countWhere(
-        client,
-        `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 AND kind = $2 AND ref_id = $3`,
-        [targetLogin, kind, refId],
+    for (const table of ["notification", "folder_notification"] as const) {
+      const notifications = await client.query<{ row: Row; id: string; kind: string; ref_id: string; user_login: string }>(
+        `SELECT to_jsonb(n) AS row, n.id, n.kind, n.ref_id, n.user_login FROM ${table} n WHERE lower(btrim(n.user_login)) = $1 ORDER BY n.id`,
+        [sourceLogin],
       );
-      if (duplicate) add({ kind: "delete", table: "notification", key: { id }, row, label: "notification.user_login deduplicated" });
-      else update("notification", { id }, "user_login", userLogin, targetLogin, "notification.user_login moved");
-    }
-    const actorLogins = await client.query<{ id: string; actor_login: string }>(
-      `SELECT id, actor_login FROM notification WHERE lower(btrim(actor_login)) = $1 ORDER BY id`,
-      [sourceLogin],
-    );
-    for (const row of actorLogins.rows) {
-      update("notification", { id: row.id }, "actor_login", row.actor_login, targetLogin, "notification.actor_login updated");
+      for (const { row, id, kind, ref_id: refId, user_login: userLogin } of notifications.rows) {
+        const duplicate = await countWhere(
+          client,
+          `SELECT COUNT(*)::text AS count FROM ${table} WHERE lower(btrim(user_login)) = $1 AND kind = $2 AND ref_id = $3`,
+          [targetLogin, kind, refId],
+        );
+        if (duplicate) add({ kind: "delete", table, key: { id }, row, label: `${table}.user_login deduplicated` });
+        else update(table, { id }, "user_login", userLogin, targetLogin, `${table}.user_login moved`);
+      }
+      const actorLogins = await client.query<{ id: string; actor_login: string }>(
+        `SELECT id, actor_login FROM ${table} WHERE lower(btrim(actor_login)) = $1 ORDER BY id`,
+        [sourceLogin],
+      );
+      for (const row of actorLogins.rows) {
+        update(table, { id: row.id }, "actor_login", row.actor_login, targetLogin, `${table}.actor_login updated`);
+      }
     }
   }
 
@@ -1014,6 +1021,11 @@ async function countResidualReferences(
     total += await countWhere(
       client,
       `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 OR lower(btrim(actor_login)) = $1`,
+      [sourceLogin],
+    );
+    total += await countWhere(
+      client,
+      `SELECT COUNT(*)::text AS count FROM folder_notification WHERE lower(btrim(user_login)) = $1 OR lower(btrim(actor_login)) = $1`,
       [sourceLogin],
     );
   }

@@ -20,6 +20,7 @@ const { setVideoStorageForTests } = await import("@/server/video-storage");
 const { createFolder, moveDocumentsToFolder } = await import("@/server/folders");
 const { createApiToken } = await import("@/server/tokens");
 const { exportPaths, sanitizePathSegment } = await import("@/server/account");
+const { notifyFolderShare } = await import("@/server/notifications");
 const me = await import("@/app/api/me/route");
 const exportAll = await import("@/app/api/me/export/route");
 type VideoStorage = import("@/server/video-storage").VideoStorage;
@@ -140,6 +141,10 @@ describe("DELETE /api/me", () => {
     await db.insert(schema.collaborators).values({ documentId: theirs.id, login: actor.login.toUpperCase(), role: "editor" });
     await db.insert(schema.folderCollaborators).values({ folderId: sharedFolder.folder.id, login: actor.login.toUpperCase(), role: "viewer" });
     await db.insert(schema.notifications).values({ id: `n-${sequence}`, userLogin: actor.login, documentId: theirs.id, kind: "share", refId: theirs.id });
+    await db.insert(schema.folderNotifications).values([
+      { id: `folder-n-${sequence}`, userLogin: actor.login, folderId: sharedFolder.folder.id, kind: "share", refId: sharedFolder.folder.id },
+      { id: `other-folder-n-${sequence}`, userLogin: other.login, folderId: sharedFolder.folder.id, kind: "access.request", actorLogin: actor.login, refId: "other-request" },
+    ]);
 
     const res = await del({ confirm: ` ${actor.login.toUpperCase()} ` });
     await sweepVideoStorageCleanup();
@@ -150,6 +155,14 @@ describe("DELETE /api/me", () => {
     expect(await db.select().from(schema.collaborators).where(eq(schema.collaborators.documentId, theirs.id))).toHaveLength(0);
     expect(await db.select().from(schema.folderCollaborators).where(eq(schema.folderCollaborators.folderId, sharedFolder.folder.id))).toHaveLength(0);
     expect(await db.select().from(schema.notifications).where(eq(schema.notifications.userLogin, actor.login))).toHaveLength(0);
+    expect(await db.select().from(schema.folderNotifications).where(eq(schema.folderNotifications.userLogin, actor.login))).toHaveLength(0);
+    expect(await db.select().from(schema.folderNotifications).where(eq(schema.folderNotifications.folderId, sharedFolder.folder.id))).toMatchObject([
+      { userLogin: other.login, actorLogin: actor.login },
+    ]);
+    const recreated = await makeUser(actor.login);
+    expect(await db.select().from(schema.folderNotifications).where(eq(schema.folderNotifications.userLogin, recreated.login))).toHaveLength(0);
+    expect(await notifyFolderShare(sharedFolder.folder.id, recreated.login, "viewer", { login: other.login, name: other.name })).toBe(true);
+    expect(await db.select().from(schema.folderNotifications).where(eq(schema.folderNotifications.userLogin, recreated.login))).toHaveLength(1);
     expect(discarded).toEqual([`videos/${videoId}`]);
   });
 
@@ -181,6 +194,10 @@ describe("DELETE /api/me", () => {
       size: 12,
     });
     await db.update(schema.videoUploads).set({ state: "completing" }).where(eq(schema.videoUploads.id, uploadId));
+    const other = await makeUser();
+    const shared = await createFolder(other.id, "Still shared");
+    if (shared.outcome !== "ok") throw new Error("folder not created");
+    await db.insert(schema.folderNotifications).values({ id: `rollback-folder-n-${sequence}`, userLogin: actor.login, folderId: shared.folder.id, kind: "share", refId: shared.folder.id });
 
     const response = await del({ confirm: actor.login });
 
@@ -191,6 +208,7 @@ describe("DELETE /api/me", () => {
     expect(await db.select().from(schema.documents).where(eq(schema.documents.id, finalizingDocument.id))).toHaveLength(1);
     expect(await db.select().from(schema.assets).where(eq(schema.assets.id, videoId))).toHaveLength(1);
     expect(await db.select().from(schema.videoStorageCleanup)).toHaveLength(0);
+    expect(await db.select().from(schema.folderNotifications).where(eq(schema.folderNotifications.userLogin, actor.login))).toHaveLength(1);
     expect(discarded).toEqual([]);
   });
 

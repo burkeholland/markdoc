@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 26, userForeignKeys: 12 },
+        schema: { tables: 27, userForeignKeys: 12 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -79,10 +79,12 @@ describe("GitHub identity repair", () => {
       expect(report.dependencies["folder_collaborator.login"]).toBe(1);
       expect(report.dependencies["notification.user_login"]).toBe(1);
       expect(report.dependencies["notification.actor_login"]).toBe(1);
+      expect(report.dependencies["folder_notification.user_login"]).toBe(1);
+      expect(report.dependencies["folder_notification.actor_login"]).toBe(1);
       expect(
         Object.entries(report.dependencies).every(
           ([label, count]) =>
-            ["collaborator.login", "folder_collaborator.login", "notification.user_login", "notification.actor_login"].includes(label) ||
+            ["collaborator.login", "folder_collaborator.login", "notification.user_login", "notification.actor_login", "folder_notification.user_login", "folder_notification.actor_login"].includes(label) ||
             count === 0,
         ),
       ).toBe(true);
@@ -115,6 +117,7 @@ describe("GitHub identity repair", () => {
     try {
       const beforeCounts = await tableCounts(fixture.database);
       const beforeGistUpdates = await fixture.database.query(`SELECT * FROM gist_auto_update`);
+      const beforeFolderNotifications = await fixture.database.query(`SELECT * FROM folder_notification ORDER BY id`);
       const applied = await repairGithubIdentity({
         client: fixture.client,
         expectedLogin: LOGIN,
@@ -160,6 +163,7 @@ describe("GitHub identity repair", () => {
       expect((await fixture.database.query(`SELECT * FROM gist_auto_update`)).rows).toEqual(
         beforeGistUpdates.rows,
       );
+      expect((await fixture.database.query(`SELECT * FROM folder_notification ORDER BY id`)).rows).toEqual(beforeFolderNotifications.rows);
       expect(afterCounts.account).toBe(beforeCounts.account);
       expect(afterCounts.user).toBe(beforeCounts.user - 1);
 
@@ -209,6 +213,7 @@ describe("GitHub identity repair", () => {
         },
       });
       expect(await tableCounts(fixture.database)).toEqual(beforeCounts);
+      expect((await fixture.database.query(`SELECT * FROM folder_notification ORDER BY id`)).rows).toEqual(beforeFolderNotifications.rows);
       expect((await fixture.database.query(`SELECT * FROM gist_auto_update`)).rows).toEqual(
         beforeGistUpdates.rows,
       );
@@ -779,6 +784,13 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
        ('preserved-folder', 'other-user', $1),
        ('preserved-folder', $2, $1)`,
     [LEGACY_ID, LOGIN.toUpperCase()],
+  );
+  await database.query(
+    `INSERT INTO folder_notification (id, user_login, folder_id, kind, actor_login, ref_id)
+     VALUES
+       ('folder-login-recipient', $1, 'preserved-folder', 'share', 'another-user', 'preserved-folder'),
+       ('folder-login-actor', 'other-user', 'preserved-folder', 'access.request', $1, 'folder-request')`,
+    [LOGIN],
   );
 }
 

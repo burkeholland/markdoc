@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "@/lib/api";
 import type { DocumentDto } from "@/server/dto";
 import { DocumentShareDialog } from "./document-share-dialog";
+import { useState } from "react";
 
 function document(id = "budget", title = "Budget"): DocumentDto {
   return {
@@ -35,6 +36,37 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("document sharing outside the editor", () => {
+  it.each(["loading", "loaded", "retry-loaded"] as const)("returns keyboard focus to the original actions trigger after closing %s metadata", async (phase) => {
+    const pending = deferred<Awaited<ReturnType<typeof api.documents.get>>>();
+    vi.mocked(api.documents.get).mockReturnValueOnce(pending.promise);
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return <>
+        <button type="button" onClick={() => setOpen(true)}>Document actions</button>
+        {open && <DocumentShareDialog target={target} onOpenChange={setOpen} />}
+      </>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Document actions" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await screen.findByRole("status");
+    const loadingClose = screen.getByRole("button", { name: "Close" });
+    loadingClose.focus();
+    if (phase === "retry-loaded") {
+      await act(async () => pending.reject(new ApiError(503, "Metadata unavailable")));
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByTestId("share-presentation");
+    } else if (phase === "loaded") {
+      await act(async () => pending.resolve(metadata()));
+      await screen.findByTestId("share-presentation");
+      expect(loadingClose.isConnected).toBe(false);
+    }
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("loads fresh owner metadata and reuses the named Share dialog without granting or changing access", async () => {
     render(<DocumentShareDialog target={target} onOpenChange={vi.fn()} />);
     await screen.findByTestId("share-presentation");

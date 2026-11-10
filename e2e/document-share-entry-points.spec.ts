@@ -97,3 +97,43 @@ test("a folder-link visitor cannot open document or folder sharing management", 
   await anonymous.close();
   await owner.close();
 });
+
+for (const entry of ["main dashboard", "folder page"] as const) {
+  test(`${entry} returns keyboard focus to the document actions trigger after metadata loads`, async ({ browser }, testInfo) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await devLogin(page, uniqueLogin("share-focus"));
+    const id = await createDocument(page, "# Focus fixture\n", "Keyboard budget");
+    const created = await page.request.post("/api/folders", { data: { name: "Keyboard planning" } });
+    const { folder } = await created.json() as { folder: { id: string } };
+    expect((await page.request.post("/api/documents/move", { data: { documentIds: [id], folderId: folder.id } })).ok()).toBeTruthy();
+    await page.goto(entry === "folder page" ? `/f/${folder.id}` : "/");
+    await waitForHydration(page);
+    const row = entry === "folder page"
+      ? page.locator(`[data-testid="folder-document-row"][data-document-id="${id}"]`)
+      : page.getByTestId("document-card").filter({ hasText: "Keyboard budget" }).locator("..");
+    const trigger = row.getByTestId("document-menu");
+    let release!: () => void;
+    const metadata = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/api/documents/${id}`, async (route) => {
+      await metadata;
+      await route.continue();
+    });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await page.getByTestId("document-share").focus();
+    await page.keyboard.press("Enter");
+    const loading = page.getByRole("dialog", { name: "Share document “Keyboard budget”" });
+    await expect(loading.getByRole("status")).toContainText("Loading document sharing");
+    await loading.getByRole("button", { name: "Close", exact: true }).focus();
+    release();
+    const dialog = page.getByRole("dialog", { name: "Share “Keyboard budget”" });
+    await expect(dialog.getByTestId("share-login")).toBeVisible();
+    if (entry === "main dashboard") await dialog.screenshot({ path: testInfo.outputPath("document-share.png") });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await expect(page.getByTestId("editor-shell")).toHaveCount(0);
+    await context.close();
+  });
+}

@@ -14,7 +14,7 @@ vi.mock("@/lib/clipboard", async (importOriginal) => {
 });
 
 const notifications = vi.hoisted(() => ({ markNotificationRead: vi.fn() }));
-vi.mock("@/lib/notifications-store", () => notifications);
+vi.mock("@/lib/notifications-store", () => ({ markNotificationReadConfirmed: notifications.markNotificationRead }));
 
 type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
 type Role = CollaboratorDto["role"];
@@ -109,7 +109,7 @@ beforeEach(() => {
   vi.spyOn(api.documents, "removeCollaborator").mockResolvedValue({ ok: true });
   vi.spyOn(api.documents, "patch").mockResolvedValue({ document: doc({ linkAccess: "view" }) });
   vi.mocked(copyText).mockResolvedValue(true);
-  notifications.markNotificationRead.mockReset().mockResolvedValue(undefined);
+  notifications.markNotificationRead.mockReset().mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -146,7 +146,7 @@ describe("ShareDialog", () => {
     });
 
     it("waits for the notification read to finish before closing after a grant", async () => {
-      const read = deferred<void>();
+      const read = deferred<boolean>();
       const onOpenChange = vi.fn();
       notifications.markNotificationRead.mockReturnValueOnce(read.promise);
       renderShare({ accessRequest: request, onOpenChange });
@@ -158,7 +158,7 @@ describe("ShareDialog", () => {
       expect(onOpenChange).not.toHaveBeenCalled();
 
       await act(async () => {
-        read.resolve(undefined);
+        read.resolve(true);
         await read.promise;
       });
 
@@ -174,6 +174,19 @@ describe("ShareDialog", () => {
       expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
       expect(api.documents.addCollaborator).not.toHaveBeenCalled();
       await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    });
+
+    it("keeps an unconfirmed notification dismissal open with an explicit error and allows retry", async () => {
+      notifications.markNotificationRead.mockResolvedValueOnce(false);
+      const onOpenChange = vi.fn();
+      renderShare({ accessRequest: request, onOpenChange });
+      fireEvent.click(screen.getByTestId("access-request-deny"));
+      expect(await screen.findByTestId("access-request-error")).toHaveTextContent("Could not mark this request as resolved");
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("access-request-deny"));
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+      expect(notifications.markNotificationRead).toHaveBeenCalledTimes(2);
     });
 
     it("keeps a failed grant open and unread so it can be retried", async () => {

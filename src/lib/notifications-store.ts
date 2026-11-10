@@ -40,6 +40,7 @@ interface ReadOperation {
   retryErrorId: number | null;
   optimisticAt: string;
   promise: Promise<void>;
+  confirmation: Promise<boolean>;
   notificationId?: string;
   documentId?: string;
   refIds?: string[];
@@ -48,7 +49,7 @@ interface ReadOperation {
 
 type ReadOperationInit = Omit<
   ReadOperation,
-  "id" | "cacheRevision" | "superseded" | "fullyConfirmed" | "retryErrorId" | "optimisticAt" | "promise"
+  "id" | "cacheRevision" | "superseded" | "fullyConfirmed" | "retryErrorId" | "optimisticAt" | "promise" | "confirmation"
 >;
 
 interface RefreshOperation {
@@ -382,8 +383,10 @@ function beginRead<T>(
   register: (owner: ReadOperation) => void,
   request: () => Promise<T>,
   onSuccess: (result: T, owner: ReadOperation) => NotificationReadError | null,
-): Promise<void> {
+): ReadOperation {
   const retryError = state.readError;
+  let resolveConfirmation!: (confirmed: boolean) => void;
+  const confirmation = new Promise<boolean>((resolve) => { resolveConfirmation = resolve; });
   let resolveOwner!: () => void;
   let rejectOwner!: (reason?: unknown) => void;
   const shared = new Promise<void>((resolve, reject) => {
@@ -399,6 +402,7 @@ function beginRead<T>(
     retryErrorId: retryError && failureMatches(retryError, operation) ? retryError.id : null,
     optimisticAt: new Date().toISOString(),
     promise: shared,
+    confirmation,
   };
   register(owner);
   publish();
@@ -410,9 +414,11 @@ function beginRead<T>(
     pending = Promise.reject(error);
   }
 
+  let confirmed = false;
   const settlement = pending
     .then(
       (result) => {
+        confirmed = true;
         if (!isOwner(owner) || owner.superseded || owner.cacheRevision !== cacheRevision) return;
         const readError = onSuccess(result, owner);
         publish({ readError });
@@ -430,8 +436,11 @@ function beginRead<T>(
       unregister(owner);
       publish();
     });
-  void settlement.then(resolveOwner, rejectOwner);
-  return owner.promise;
+  void settlement.then(
+    () => { resolveOwner(); resolveConfirmation(confirmed); },
+    (error: unknown) => { rejectOwner(error); resolveConfirmation(false); },
+  );
+  return owner;
 }
 
 function idsFor(pred: (notification: NotificationDto) => boolean): Set<string> {
@@ -442,9 +451,9 @@ function refKey(documentId: string, refIds: string[]): string {
   return JSON.stringify([documentId, [...new Set(refIds)].sort()]);
 }
 
-export function markNotificationRead(id: string): Promise<void> {
+function singleRead(id: string): ReadOperation {
   const current = singleReads.get(id);
-  if (current) return current.promise;
+  if (current) return current;
   const ids = idsFor((notification) => notification.id === id);
   const scope: OperationScope = { kind: "ids", ids: new Set(ids) };
   return beginRead(
@@ -453,6 +462,15 @@ export function markNotificationRead(id: string): Promise<void> {
     () => api.notifications.read(id),
     () => commitRead((notification) => notification.id === id, { kind: "ids", ids: new Set([id]) }),
   );
+}
+
+export function markNotificationRead(id: string): Promise<void> {
+  return singleRead(id).promise;
+}
+
+/** Explicit request decisions must distinguish a confirmed HTTP write from the store's optimistic UI. */
+export function markNotificationReadConfirmed(id: string): Promise<boolean> {
+  return singleRead(id).confirmation;
 }
 
 export function markAllNotificationsRead(): Promise<void> {
@@ -465,7 +483,7 @@ export function markAllNotificationsRead(): Promise<void> {
     },
     () => api.notifications.readAll(),
     () => commitRead(() => true, { kind: "all" }, true),
-  );
+  ).promise;
 }
 
 /** Mark read everything about a thread (its id and its replies' ids) in a document. */
@@ -500,7 +518,7 @@ function markRefsReadOwned(documentId: string, refIds: string[], retry: boolean)
       if (result.count > owner.localChanged) void refreshNotifications();
       return readError;
     },
-  );
+  ).promise;
 }
 
 export function markRefsRead(documentId: string, refIds: string[]): Promise<void> {

@@ -23,6 +23,7 @@ export const FIXTURE_TABLES = [
   "document",
   "folder",
   "folder_collaborator",
+  "folder_notification",
   "notification",
   "ownership_transfer",
   "recent",
@@ -66,6 +67,9 @@ export const FIXTURE_EXPECTED_DRY_RUN: Record<(typeof TRANSFER_COUNT_LABELS)[num
   "notification.user_login moved": 1,
   "notification.user_login deduplicated": 1,
   "notification.actor_login updated": 1,
+  "folder_notification.user_login moved": 1,
+  "folder_notification.user_login deduplicated": 1,
+  "folder_notification.actor_login updated": 1,
   "document.ystate identity metadata (not rewritten)": 1,
   "user deleted": 1,
 };
@@ -157,6 +161,14 @@ export async function seedLegacyOwnershipFixture(q: FixtureQuery): Promise<void>
        ('note-dup-target', $2, 'doc-o2', 'share', 'other', 'doc-o2', ''),
        ('note-actor', 'other', 'doc-o1', 'reply', $1, 'thread-2', ''),
        ('note-target', $2, 'doc-t1', 'mention', 'other', 'thread-3', '')`,
+    [sourceLogin, targetLogin],
+  );
+  await q(
+    `INSERT INTO folder_notification (id, user_login, folder_id, kind, actor_login, ref_id) VALUES
+       ('folder-note-move', $1, 'fold-other-move', 'share', 'other', 'fold-other-move'),
+       ('folder-note-dup-source', $1, 'fold-other', 'share', 'other', 'fold-other'),
+       ('folder-note-dup-target', $2, 'fold-other', 'share', 'other', 'fold-other'),
+       ('folder-note-actor', 'other', 'fold-legacy', 'access.request', $1, 'folder-request')`,
     [sourceLogin, targetLogin],
   );
 }

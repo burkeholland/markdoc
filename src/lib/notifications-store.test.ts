@@ -157,6 +157,36 @@ describe("notification loading", () => {
 });
 
 describe("notification read ownership", () => {
+  it("reports failed and retried HTTP confirmation without requiring a notification subscriber", async () => {
+    const store = await import("./notifications-store");
+    notificationApi.read.mockRejectedValueOnce(new Error("write unavailable")).mockResolvedValueOnce({ ok: true, changed: true });
+    expect(await store.markNotificationReadConfirmed("folder-request")).toBe(false);
+    expect(await store.markNotificationReadConfirmed("folder-request")).toBe(true);
+    expect(notificationApi.read).toHaveBeenCalledTimes(2);
+    expect(notificationApi.list).not.toHaveBeenCalled();
+  });
+
+  it("shares the actual write between optimistic and confirmed callers without confusing an optimistic read with success", async () => {
+    const pending = deferred<{ ok: true; changed: boolean }>();
+    notificationApi.read.mockReturnValueOnce(pending.promise);
+    const { store, result } = await mountLoaded({ items: [ITEM], unreadCount: 1 });
+    let optimistic!: Promise<void>;
+    let confirmed!: Promise<boolean>;
+    act(() => {
+      optimistic = store.markNotificationRead(ITEM.id);
+      confirmed = store.markNotificationReadConfirmed(ITEM.id);
+    });
+    expect(result.current.items[0].readAt).not.toBeNull();
+    expect(notificationApi.read).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      pending.reject(new Error("write failed"));
+      await optimistic;
+      expect(await confirmed).toBe(false);
+    });
+    expect(result.current.items[0].readAt).toBeNull();
+    expect(result.current.readError).toMatchObject({ operation: "single", notificationId: ITEM.id });
+  });
+
   it("shares duplicate single reads while independent ids settle and retry separately", async () => {
     const firstRead = deferred<{ ok: true; changed: boolean }>();
     const secondRead = deferred<{ ok: true; changed: boolean }>();

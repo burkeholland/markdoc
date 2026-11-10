@@ -8,7 +8,7 @@ import { ApiError, api, apiErrorText, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
-import { markNotificationRead } from "@/lib/notifications-store";
+import { markNotificationReadConfirmed } from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
 
 type CollaboratorRole = Exclude<Role, "owner">;
@@ -83,16 +83,7 @@ function LinkRow({
   );
 }
 
-export const ShareDialog = memo(function ShareDialog({
-  open,
-  onOpenChange,
-  doc,
-  isOwner,
-  onDocChange,
-  onConnectAgent,
-  accessRequest,
-  onAccessRequestClosed,
-}: {
+type ShareDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
@@ -102,7 +93,23 @@ export const ShareDialog = memo(function ShareDialog({
   onConnectAgent?: () => void;
   accessRequest?: AccessRequest | null;
   onAccessRequestClosed?: () => void;
-}) {
+};
+
+export const ShareDialog = memo(function ShareDialog(props: ShareDialogProps) {
+  return <Dialog open={props.open} onOpenChange={props.onOpenChange}><ShareDialogContent {...props} /></Dialog>;
+});
+
+/** Reuse inside an existing Dialog so asynchronous metadata loading retains the original opener. */
+export const ShareDialogContent = memo(function ShareDialogContent({
+  open,
+  onOpenChange,
+  doc,
+  isOwner,
+  onDocChange,
+  onConnectAgent,
+  accessRequest,
+  onAccessRequestClosed,
+}: ShareDialogProps) {
   const [list, setList] = useState<ListState>({ status: "loading" });
   const [retry, setRetry] = useState(0);
   const [login, setLogin] = useState("");
@@ -308,7 +315,10 @@ export const ShareDialog = memo(function ShareDialog({
           }
         }
       }
-      if (accessRequest.notificationId) await markNotificationRead(accessRequest.notificationId);
+      if (accessRequest.notificationId && !(await markNotificationReadConfirmed(accessRequest.notificationId))) {
+        if (currentDoc.current === documentId) setRequestError("Could not mark this request as resolved. Check the access list before retrying.");
+        return;
+      }
       if (currentDoc.current === documentId) onOpenChange(false);
     } catch (e) {
       if (currentDoc.current === documentId) setRequestError(apiErrorText(e, "Could not mark this request as resolved."));
@@ -340,7 +350,6 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title={accessRequest ? `Share document “${doc.title}”` : `Share “${doc.title}”`}
         description={accessRequest ? `${requestLabel} requested access to this document.` : "Add people by GitHub handle. They sign in with GitHub."}
@@ -633,6 +642,5 @@ export const ShareDialog = memo(function ShareDialog({
           </div>
         </div>}
       </DialogContent>
-    </Dialog>
   );
 });

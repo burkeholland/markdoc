@@ -12,7 +12,7 @@ import { Avatar } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
 import { FolderAccessExceptions, FolderPreviewFeedback, FOLDER_SHARE_WARNING, useFolderAccessPreview } from "./folder-access-preview";
 import { useCopy } from "@/lib/hooks";
-import { markNotificationRead } from "@/lib/notifications-store";
+import { markNotificationReadConfirmed } from "@/lib/notifications-store";
 
 /**
  * The id of the folder being browsed, or one of the two pseudo-selections. `null` is "All documents"
@@ -505,6 +505,9 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   const [addError, setAddError] = React.useState<string | null>(null);
   const [addNote, setAddNote] = React.useState<string | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const [requestError, setRequestError] = React.useState<string | null>(null);
+  const [requestBusy, setRequestBusy] = React.useState(false);
+  const resolvingRequest = React.useRef(false);
   const [busyLogins, setBusyLogins] = React.useState<ReadonlySet<string>>(new Set());
   const [linkBusy, setLinkBusy] = React.useState(false);
   const [origin, setOrigin] = React.useState("");
@@ -518,8 +521,14 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   const currentFolder = React.useRef<string | null>(folder?.id ?? null);
   const focusRole = React.useCallback(() => roleSelect.current?.focus(), []);
   const folderId = folder?.id ?? null;
+  const requestId = accessRequest?.notificationId ?? accessRequest?.login ?? null;
+  const currentRequest = React.useRef(requestId);
 
   React.useEffect(() => setOrigin(window.location.origin), []);
+  React.useEffect(() => {
+    currentRequest.current = requestId;
+    setRequestError(null);
+  }, [folderId, requestId]);
   React.useEffect(() => {
     if (!folderId || !accessRequest) return;
     setLogin(accessRequest.login);
@@ -615,11 +624,23 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   };
 
   const resolveRequest = async () => {
+    if (!folder || !accessRequest || resolvingRequest.current) return;
+    const targetId = folder.id;
+    const targetRequest = requestId;
+    resolvingRequest.current = true;
+    setRequestBusy(true);
+    setRequestError(null);
     try {
-      if (accessRequest?.notificationId) await markNotificationRead(accessRequest.notificationId);
-      onRequestResolved?.();
+      if (accessRequest.notificationId && !(await markNotificationReadConfirmed(accessRequest.notificationId))) {
+        if (currentFolder.current === targetId && currentRequest.current === targetRequest) setRequestError("Could not dismiss this request. Try again.");
+        return;
+      }
+      if (currentFolder.current === targetId && currentRequest.current === targetRequest) onRequestResolved?.();
     } catch (error) {
-      setActionError(apiErrorText(error, "Could not mark this request as resolved. Check the access list before retrying."));
+      if (currentFolder.current === targetId && currentRequest.current === targetRequest) setRequestError(apiErrorText(error, "Could not dismiss this request. Try again."));
+    } finally {
+      resolvingRequest.current = false;
+      setRequestBusy(false);
     }
   };
 
@@ -673,7 +694,8 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
           {accessRequest && (
             <div className="rounded-lg border border-line px-3 py-2 text-sm" data-testid="folder-access-request">
               <p>@{accessRequest.login} requested access to this folder. Review the folder scope and any higher document access before adding them.</p>
-              <button type="button" className="btn btn-outline btn-sm mt-2" onClick={() => void resolveRequest()}>Dismiss request</button>
+              {requestError && <p className="mt-2 text-danger" role="alert">{requestError}</p>}
+              <button type="button" className="btn btn-outline btn-sm mt-2" disabled={requestBusy} onClick={() => void resolveRequest()}>{requestBusy ? "Dismissing…" : requestError ? "Retry dismissal" : "Dismiss request"}</button>
             </div>
           )}
           <form className="flex flex-wrap gap-2" onSubmit={(event) => void add(event)}>

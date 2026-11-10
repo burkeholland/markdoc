@@ -47,7 +47,7 @@ describe("legacy ownership transfer", () => {
     expect(declared.sort()).toEqual([...TRANSFER_USER_FOREIGN_KEYS]);
     expect([...TRANSFER_USER_FOREIGN_KEYS]).toEqual([...TRANSFER_USER_FOREIGN_KEYS].sort());
     expect(TRANSFER_SOFT_USER_REFERENCES).toHaveLength(5);
-    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(4);
+    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(6);
   });
 
   it("dry-runs the production shape as counts only and writes nothing", async () => {
@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 4, rollbackTableReady: true },
+        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 6, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,
@@ -130,7 +130,8 @@ describe("legacy ownership transfer", () => {
            (SELECT COUNT(*) FROM review WHERE user_id = $1) +
            (SELECT COUNT(*) FROM webhook WHERE user_id = $1) +
            (SELECT COUNT(*) FROM activity WHERE actor_id = $1 OR actor_id LIKE 'agent:' || $1 || ':%') +
-           (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2)
+           (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2) +
+           (SELECT COUNT(*) FROM folder_notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2)
          )::text AS count`,
         [SOURCE_ID, SOURCE_LOGIN],
       );

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, apiErrorText } from "@/lib/api";
 import type { DocumentDto } from "@/server/dto";
-import { ShareDialog } from "@/components/editor/share-dialog";
+import { ShareDialogContent } from "@/components/editor/share-dialog";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 
 type State =
@@ -38,19 +38,18 @@ export function DocumentShareDialog({ target, onOpenChange }: {
     return () => controller.abort();
   }, [target.id, retry]);
 
-  if (state.id === target.id && state.status === "loaded") {
-    return <ShareDialog open onOpenChange={onOpenChange} doc={state.document} isOwner
-      onDocChange={(document) => setState((current) => current.id === document.id ? { id: document.id, status: "loaded", document } : current)} />;
-  }
   const error = state.id === target.id && state.status === "error" ? state : null;
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent title={`Share document “${target.title}”`} description="Manage access to this document without opening the editor.">
+      {state.id === target.id && state.status === "loaded"
+        ? <ShareDialogContent open onOpenChange={onOpenChange} doc={state.document} isOwner
+          onDocChange={(document) => setState((current) => current.id === document.id ? { id: document.id, status: "loaded", document } : current)} />
+        : <DialogContent title={`Share document “${target.title}”`} description="Manage access to this document without opening the editor.">
         {error ? <div role="alert" className="text-sm text-danger">
           <p>{error.message}</p>
           {error.retryable && <button type="button" className="btn btn-outline mt-3" onClick={() => setRetry((value) => value + 1)}>Retry</button>}
         </div> : <p role="status" className="text-sm text-ink-3">Loading document sharing…</p>}
-      </DialogContent>
+      </DialogContent>}
     </Dialog>
   );
 }
