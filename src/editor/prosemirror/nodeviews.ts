@@ -79,7 +79,9 @@ class ListItemView implements NodeView {
 class CodeBlockView implements NodeView {
   dom: HTMLElement;
   contentDOM: HTMLElement;
+  private controls: HTMLElement;
   private input: HTMLInputElement;
+  private wrap: HTMLButtonElement;
 
   constructor(
     private node: PMNode,
@@ -90,6 +92,9 @@ class CodeBlockView implements NodeView {
     this.dom = document.createElement("pre");
     this.dom.className = "md-code-block";
     this.contentDOM = document.createElement("code");
+    this.controls = document.createElement("span");
+    this.controls.className = "md-code-controls";
+    this.controls.setAttribute("contenteditable", "false");
     this.input = document.createElement("input");
     this.input.className = "md-code-lang-input";
     this.input.placeholder = "language";
@@ -106,7 +111,27 @@ class CodeBlockView implements NodeView {
     });
     this.input.addEventListener("change", () => this.commit());
     this.input.addEventListener("blur", () => this.commit());
-    this.dom.appendChild(this.input);
+    this.wrap = document.createElement("button");
+    this.wrap.type = "button";
+    this.wrap.className = "md-code-wrap";
+    this.wrap.textContent = "Wrap";
+    this.wrap.setAttribute("aria-label", "Wrap code block");
+    this.wrap.setAttribute("aria-pressed", "false");
+    this.wrap.title = "Wrap long lines";
+    this.wrap.addEventListener("mousedown", (e) => e.preventDefault());
+    this.wrap.addEventListener("click", () => {
+      const wrapped = this.dom.classList.toggle("md-code-wrapped");
+      this.wrap.setAttribute("aria-pressed", String(wrapped));
+    });
+    this.wrap.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.wrap.blur();
+        this.view.focus();
+      }
+    });
+    this.controls.append(this.input, this.wrap);
+    this.dom.appendChild(this.controls);
     this.dom.appendChild(this.contentDOM);
     this.render();
   }
@@ -137,11 +162,12 @@ class CodeBlockView implements NodeView {
   }
 
   ignoreMutation(mutation: ViewMutationRecord) {
-    return this.input === mutation.target || this.input.contains(mutation.target);
+    return this.controls.contains(mutation.target) ||
+      (mutation.type === "attributes" && mutation.target === this.dom);
   }
 
   stopEvent(event: Event) {
-    return event.target === this.input;
+    return this.controls.contains(event.target as Node);
   }
 }
 
