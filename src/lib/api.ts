@@ -222,7 +222,7 @@ export const api = {
       ),
     create: (body: { title?: string; content?: string; template?: string } = {}) =>
       request<{ document: { id: string; title: string } }>("/api/documents", { method: "POST", body: JSON.stringify(body) }),
-    get: (id: string) => request<{ document: DocumentDto; role: Role }>(`/api/documents/${id}`),
+    get: (id: string, init?: RequestInit) => request<{ document: DocumentDto; role: Role }>(`/api/documents/${id}`, init),
     starred: (id: string) => request<{ starred: boolean }>(`/api/documents/${id}/star`),
     star: (id: string) => request<{ starred: true }>(`/api/documents/${id}/star`, { method: "PUT" }),
     unstar: (id: string) => request<{ starred: false }>(`/api/documents/${id}/star`, { method: "DELETE" }),

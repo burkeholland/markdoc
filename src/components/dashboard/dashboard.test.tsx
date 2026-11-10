@@ -63,7 +63,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { ApiError } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
 import { Dashboard, TemplateGrid, TrashView, type DashboardProps } from "./dashboard";
 
@@ -915,6 +915,63 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("dashboard document Share entry points", () => {
+  const budget = { ...doc("budget", "Budget"), folderId: "planning", folderName: "Planning" };
+  beforeEach(() => {
+    vi.useRealTimers();
+    listFolders.mockResolvedValue({ folders: [folder("planning", "Planning", 1)] });
+    searchDocuments.mockResolvedValue({ query: "Budget", documents: [{ ...budget, snippet: null }] });
+    vi.spyOn(api.documents, "get").mockResolvedValue({
+      document: {
+        ...budget, linkAccess: "private", linkPreview: true, gistFile: null, repoBranch: null,
+        publishedAt: null, hasUnpublishedChanges: false, githubUrl: null,
+      },
+      role: "owner",
+    });
+    vi.spyOn(api.documents, "collaborators").mockResolvedValue({
+      owner: { login: USER.login, name: USER.name, image: null }, collaborators: [], agents: [], folder: null, linkAccess: "private",
+    });
+    vi.spyOn(api.documents, "addCollaborator").mockResolvedValue({ ok: true, login: "fixture", role: "viewer", pending: true });
+    vi.spyOn(api.documents, "patch").mockResolvedValue({ document: {
+      ...budget, linkAccess: "private", linkPreview: true, gistFile: null, repoBranch: null,
+      publishedAt: null, hasUnpublishedChanges: false, githubUrl: null,
+    } });
+  });
+
+  it.each(["main dashboard", "dashboard folder"])("opens the selected document in place from the %s and preserves filters, query, sort and selection", async (entry) => {
+    renderDashboard(undefined, [budget, doc("outside", "Outside")]);
+    const chip = await screen.findByTestId("folder-chip");
+    if (entry === "dashboard folder") fireEvent.click(chip);
+    if (entry === "main dashboard") fireEvent.change(screen.getByPlaceholderText("Search documents"), { target: { value: "Budget" } });
+    fireEvent.change(screen.getByTestId("sort-select"), { target: { value: "title" } });
+    fireEvent.click(screen.getByTestId("select-document"));
+    const location = window.location.href;
+    fireEvent.click(within(openDocumentMenu("Budget")).getByTestId("document-share"));
+    await screen.findByTestId("share-presentation");
+    expect(screen.getByRole("dialog", { name: "Share “Budget”" })).toBeVisible();
+    expect(api.documents.get).toHaveBeenCalledWith("budget", expect.objectContaining({ cache: "no-store" }));
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+    expect(api.documents.patch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByPlaceholderText("Search documents")).toHaveValue(entry === "main dashboard" ? "Budget" : "");
+    expect(screen.getByTestId("sort-select")).toHaveValue("title");
+    expect(screen.getByTestId("select-document")).toBeChecked();
+    if (entry === "dashboard folder") expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-pressed", "true");
+    expect(window.location.href).toBe(location);
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it("does not offer document management actions on another owner's document", async () => {
+    renderDashboard(undefined, [{ ...budget, ownerId: "someone-else", role: "editor" }]);
+    await act(async () => {});
+    expect(screen.queryByTestId("document-menu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("document-share")).not.toBeInTheDocument();
+    expect(api.documents.get).not.toHaveBeenCalled();
+  });
 });
 
 describe("dashboard Account menu identity titles", () => {

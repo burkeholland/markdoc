@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Folder, Share2 } from "lucide-react";
+import { Folder, MoreVertical, Share2 } from "lucide-react";
 import { FolderShareDialog } from "@/components/dashboard/folders";
 import { FOLDER_SHARE_WARNING } from "@/components/dashboard/folder-access-preview";
 import type { FolderDto } from "@/lib/api";
 import type { Role } from "@/server/db/schema";
 import { isValidLogin } from "@/components/editor/collaborator-login-input";
+import { DocumentShareDialog } from "@/components/dashboard/document-share-dialog";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/primitives";
 
 export function FolderPageClient({ folder, documents, signedIn, initialShare, requestLogin, notificationId }: {
   folder: FolderDto;
@@ -16,6 +18,7 @@ export function FolderPageClient({ folder, documents, signedIn, initialShare, re
 }) {
   const owner = folder.role === "owner";
   const [sharing, setSharing] = useState(initialShare && owner);
+  const [sharingDocument, setSharingDocument] = useState<{ id: string; title: string } | null>(null);
   const [request, setRequest] = useState(() => requestLogin && isValidLogin(requestLogin) ? { login: requestLogin, notificationId } : null);
   const changeOpen = (open: boolean) => {
     setSharing(open);
@@ -40,9 +43,19 @@ export function FolderPageClient({ folder, documents, signedIn, initialShare, re
       {owner && <p className="mb-4 rounded-lg border border-line bg-surface-2 p-3 text-sm text-ink-2">{FOLDER_SHARE_WARNING}</p>}
       <ul className="divide-y divide-line rounded-xl border border-line" aria-label="Documents in this folder">
         {documents.map((document) => (
-          <li key={document.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <Link href={`/d/${document.id}`} className="min-w-0 wrap-anywhere font-medium text-accent hover:underline">{document.title}</Link>
+          <li key={document.id} className="flex items-center justify-between gap-3 px-4 py-3" data-testid="folder-document-row" data-document-id={document.id}>
+            <Link href={`/d/${document.id}`} className="min-w-0 flex-1 wrap-anywhere font-medium text-accent hover:underline">{document.title}</Link>
             <span className="shrink-0 text-xs text-ink-3">{document.role}</span>
+            {document.role === "owner" && <Menu>
+              <MenuTrigger asChild>
+                <button type="button" className="icon-btn relative h-11 w-11 shrink-0" aria-label={`Actions for ${document.title}`} data-testid="document-menu">
+                  <MoreVertical size={16} aria-hidden="true" />
+                </button>
+              </MenuTrigger>
+              <MenuContent>
+                <MenuItem icon={<Share2 size={15} />} onSelect={() => setSharingDocument({ id: document.id, title: document.title })} data-testid="document-share">Share…</MenuItem>
+              </MenuContent>
+            </Menu>}
           </li>
         ))}
         {documents.length === 0 && <li className="px-4 py-6 text-sm text-ink-3">This folder has no documents yet.</li>}
@@ -52,6 +65,7 @@ export function FolderPageClient({ folder, documents, signedIn, initialShare, re
           : <Link href={`/login?next=${encodeURIComponent(`/f/${folder.id}`)}`} className="text-accent hover:underline">Sign in to comment or edit when allowed</Link>}
       </nav>
       <FolderShareDialog folder={sharing ? folder : null} onOpenChange={changeOpen} accessRequest={request} onRequestResolved={() => setRequest(null)} />
+      {sharingDocument && <DocumentShareDialog key={sharingDocument.id} target={sharingDocument} onOpenChange={(open) => { if (!open) setSharingDocument(null); }} />}
     </main>
   );
 }

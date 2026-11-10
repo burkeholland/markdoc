@@ -16,7 +16,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, Settings, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
+import { BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, Settings, Share2, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
 import { api, apiErrorText, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -41,6 +41,7 @@ import {
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
 import { buildDashboardCommands } from "@/components/editor/commands";
 import { signOutSafely } from "@/lib/sign-out";
+import { DocumentShareDialog } from "./document-share-dialog";
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -416,6 +417,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteOpenRef = useRef(false);
   const [openPicker, setOpenPicker] = useState(false);
+  const [sharingDocument, setSharingDocument] = useState<{ id: string; title: string } | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
   const filterButtons = useRef(new Map<Filter, HTMLButtonElement>());
@@ -1828,7 +1830,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         <MenuTrigger asChild>
                           <button
                             type="button"
-                            className="tap-target absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-0 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                            className="tap-target absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-100 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 sm:opacity-0"
                             aria-label={`Actions for ${d.title}`}
                             data-testid="document-menu"
                             data-document-id={d.id}
@@ -1837,6 +1839,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                           </button>
                         </MenuTrigger>
                         <MenuContent className="w-52">
+                          {d.role === "owner" && <>
+                            <MenuItem icon={<Share2 size={15} />} onSelect={() => setSharingDocument({ id: d.id, title: d.title })} data-testid="document-share">
+                              Share…
+                            </MenuItem>
+                            <MenuSeparator />
+                          </>}
                           <MoveToItems
                             folders={folders.folders}
                             currentFolderId={d.folderId}
@@ -1868,6 +1876,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             <GitHubPicker mode="import" githubAvailable={githubAvailable} githubConfigured={githubConfigured} managedAccount={isManagedGithubLogin(user.login)} onImported={(id) => router.push(`/d/${id}`)} />
           </DialogContent>
         </Dialog>
+        {sharingDocument && <DocumentShareDialog key={sharingDocument.id} target={sharingDocument} onOpenChange={(open) => { if (!open) setSharingDocument(null); }} />}
 
         {currentNotice && (
           <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
