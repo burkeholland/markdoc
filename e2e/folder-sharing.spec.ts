@@ -1,6 +1,62 @@
 import { test, expect } from "./fixtures";
 import { createDocument, signIn, uniqueLogin, waitForHydration } from "./helpers";
 
+for (const { from, to } of [
+  { from: "private", to: "view" },
+  { from: "view", to: "private" },
+] as const) {
+  test(`confirmed folder link ${from} -> ${to} survives a failed access refresh, retry and reopening`, async ({ browser }, testInfo) => {
+    const owner = await signIn(browser, uniqueLogin("confirmed-folder-link"));
+    const page = owner.page;
+    const created = await page.request.post("/api/folders", { data: { name: "Confirmed link folder" } });
+    expect(created.ok()).toBeTruthy();
+    const { folder } = await created.json() as { folder: { id: string } };
+    const apiPath = `/api/folders/${folder.id}`;
+    if (from !== "private") expect((await page.request.patch(apiPath, { data: { linkAccess: from } })).ok()).toBeTruthy();
+    await page.goto(`/f/${folder.id}?share=1`);
+    const dialog = page.getByRole("dialog", { name: "Share folder “Confirmed link folder”" });
+    const select = dialog.getByTestId("folder-link-access");
+    await expect(select).toBeEnabled();
+    await expect(select).toHaveValue(from);
+
+    let failRefresh = true;
+    await page.route(`**${apiPath}/collaborators`, async (route) => {
+      if (failRefresh && route.request().method() === "GET") {
+        await route.fulfill({ status: 503, json: { error: "Folder access unavailable" } });
+      } else {
+        await route.continue();
+      }
+    });
+    const mutations: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "PATCH" && new URL(request.url()).pathname === apiPath) mutations.push(request.postData() ?? "");
+    });
+    const patched = page.waitForResponse((response) => response.request().method() === "PATCH" && new URL(response.url()).pathname === apiPath);
+    await select.selectOption(to);
+    const response = await patched;
+    expect(response.ok()).toBeTruthy();
+    expect((await response.json()).folder.linkAccess).toBe(to);
+    await expect(dialog.getByRole("alert")).toContainText("Folder access unavailable");
+    expect((await (await page.request.get(apiPath, { maxRetries: 1 })).json()).folder.linkAccess).toBe(to);
+    await expect(select).toHaveValue(to);
+    await expect(select).toBeDisabled();
+    expect(mutations).toEqual([JSON.stringify({ linkAccess: to })]);
+    await dialog.screenshot({ path: testInfo.outputPath("folder-link-confirmed-refresh-failure.png") });
+
+    failRefresh = false;
+    await dialog.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(select).toBeEnabled();
+    await expect(select).toHaveValue(to);
+    await dialog.getByRole("button", { name: "Done" }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.getByTestId("folder-page-share").click();
+    await expect(select).toBeEnabled();
+    await expect(select).toHaveValue(to);
+    expect((await (await page.request.get(apiPath, { maxRetries: 1 })).json()).folder.linkAccess).toBe(to);
+    expect(mutations).toEqual([JSON.stringify({ linkAccess: to })]);
+  });
+}
+
 test("folder links disclose stronger document grants before saving, preserve them afterward, and revoke only inherited access", async ({ browser }, testInfo) => {
   const owner = await signIn(browser, uniqueLogin("folder-owner"));
   const reader = await signIn(browser, uniqueLogin("folder-reader"));

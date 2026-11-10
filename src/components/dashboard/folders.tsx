@@ -650,7 +650,9 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
     setLinkBusy(true);
     setActionError(null);
     try {
-      await api.folders.updateLinkAccess(target.id, value);
+      const { folder: saved } = await api.folders.updateLinkAccess(target.id, value);
+      if (currentFolder.current !== target.id) return;
+      setPeople((current) => current ? { ...current, linkAccess: saved.linkAccess } : current);
       setPreviewRevision((revision) => revision + 1);
       await refresh(target.id);
     } catch (error) {
