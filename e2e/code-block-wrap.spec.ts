@@ -60,6 +60,7 @@ for (const width of [1440, 360, 393]) {
     const blocks = page.locator(".md-rich pre.md-code-block");
     const first = blocks.nth(0);
     const firstCode = first.locator(":scope > code");
+    const language = first.getByRole("textbox", { name: "Code block language" });
     const firstWrap = first.getByRole("button", { name: "Wrap code block" });
     const secondWrap = blocks.nth(1).getByRole("button", { name: "Wrap code block" });
     await expect(first).toHaveAttribute("data-language", "markdown");
@@ -69,14 +70,36 @@ for (const width of [1440, 360, 393]) {
     await expect.poll(async () => (await metrics(firstCode)).scrollWidth > (await metrics(firstCode)).width).toBe(true);
     await expect.poll(() => blocks.nth(1).locator('[class*="hljs-"]').count()).toBeGreaterThan(0);
     const before = await metrics(firstCode);
+    const languageBox = (await language.boundingBox())!;
     const buttonBox = (await firstWrap.boundingBox())!;
     if (phone) {
       expect(buttonBox.width).toBeGreaterThanOrEqual(44);
       expect(buttonBox.height).toBeGreaterThanOrEqual(44);
     }
 
-    await first.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
-    expect(Math.abs((await firstWrap.boundingBox())!.x - buttonBox.x)).toBeLessThan(1);
+    const beforeScroll = await state(page);
+    for (const fraction of [0, 0.5, 1]) {
+      const scrolled = await first.evaluate((element, fraction) => {
+        element.scrollLeft = fraction * (element.scrollWidth - element.clientWidth);
+        const code = element.querySelector("code")!;
+        return { scrollLeft: element.scrollLeft, codeX: code.getBoundingClientRect().x };
+      }, fraction);
+      if (fraction > 0) expect(scrolled.scrollLeft).toBeGreaterThan(0);
+      const frame = (await first.boundingBox())!;
+      for (const [control, initial] of [[language, languageBox], [firstWrap, buttonBox]] as const) {
+        const current = (await control.boundingBox())!;
+        expect(Math.abs(current.x - initial.x), `control x at scroll fraction ${fraction}`).toBeLessThan(1);
+        expect(current.y, `control y at scroll fraction ${fraction}`).toBe(initial.y);
+        expect(current.x).toBeGreaterThanOrEqual(frame.x);
+        expect(current.x + current.width).toBeLessThanOrEqual(frame.x + frame.width);
+        expect(await control.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element;
+        })).toBe(true);
+      }
+      if (fraction > 0) expect(scrolled.codeX).toBeLessThan(frame.x);
+      expect(await state(page)).toEqual(beforeScroll);
+    }
     await first.evaluate((element) => { element.scrollLeft = 0; });
     if (process.env.SHOT_DIR) {
       await first.screenshot({ path: path.join(process.env.SHOT_DIR, `code-wrap-${width}-before.png`), scale: "css" });
@@ -144,6 +167,21 @@ for (const width of [1440, 360, 393]) {
     const exported = await page.request.get(`/api/documents/${id}/export?format=md`);
     expect(exported.ok()).toBe(true);
     expect(await exported.text()).toBe(source);
+
+    await firstWrap.click();
+    await first.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+    await language.focus();
+    await page.keyboard.press(`${mod}+a`);
+    await page.keyboard.type("text");
+    await page.keyboard.press("Enter");
+    await expect(first).toHaveAttribute("data-language", "text");
+    await expect(page.locator(".md-rich")).toBeFocused();
+    await expect.poll(() => codeText(page)).toBe(source.replace("```markdown", "```text"));
+    expect(await firstCode.textContent()).toBe(code);
+    await expect(firstWrap).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.press(`${mod}+z`);
+    await expect.poll(() => codeText(page)).toBe(source);
+    await expect(language).toHaveValue("markdown");
     await context.close();
   });
 }
