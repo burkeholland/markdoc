@@ -198,6 +198,141 @@ test("a passive same-account tab reports a remote edit as saved", async ({ brows
   }
 });
 
+interface ForcedStatus {
+  state: string;
+  label: string;
+  unsynced?: number;
+  prolonged?: boolean;
+  saveError?: string;
+}
+
+/** Every label the header chip can show, shortest to longest. */
+const STATUS_CASES: ForcedStatus[] = [
+  { state: "saved", label: "Saved" },
+  { state: "saving", label: "Saving…" },
+  { state: "pending", label: "Unsaved changes" },
+  { state: "connecting", label: "Connecting…" },
+  { state: "reconnecting", label: "Reconnecting…" },
+  { state: "error", label: "Not connected" },
+  { state: "error", label: "Save failed — retry", saveError: "Store unavailable" },
+  { state: "offline", label: "Offline — changes will sync" },
+  { state: "offline", label: "Offline — 3 unsaved changes", unsynced: 3 },
+  { state: "offline", label: "Offline — changes kept on this device", unsynced: 3, prolonged: true },
+];
+
+/** Puts the live session into one save state, so the real header renders it in the real layout. */
+async function forceStatus(page: Page, forced: ForcedStatus) {
+  await page.evaluate((f) => {
+    const session = (window as unknown as { __markdocSession: Record<string, unknown> & { notify(): void } }).__markdocSession;
+    const pin = (key: string, value: unknown) => Object.defineProperty(session, key, { configurable: true, get: () => value, set: () => {} });
+    pin("saveState", f.state);
+    pin("unsyncedChanges", f.unsynced ?? 0);
+    pin("dirty", false);
+    pin("recovered", false);
+    pin("prolongedOffline", f.prolonged ?? false);
+    pin("saveError", f.saveError ?? null);
+    session.notify();
+  }, forced);
+  await expect(page.getByTestId("save-state")).toHaveText(forced.label);
+}
+
+/** Boxes of the save chip and of every other visible header control, measured in the laid-out page. */
+async function measureHeader(page: Page) {
+  return page.evaluate(() => {
+    const box = (el: Element) => {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+    };
+    const header = document.querySelector('[data-testid="header"]')!;
+    const chip = header.querySelector('[data-testid="save-state"]')!;
+    const label = chip.querySelector("button > span") as HTMLElement;
+    const labelShown = getComputedStyle(label).position !== "absolute";
+    const text = document.createRange();
+    text.selectNodeContents(label);
+    const lines = new Set(Array.from(text.getClientRects(), (r) => Math.round(r.top)));
+    const controls = Array.from(header.querySelectorAll('button, a, [data-testid="presence"]'))
+      .filter((el) => !chip.contains(el) && el.checkVisibility({ visibilityProperty: true }))
+      .map((el) => ({ name: el.getAttribute("data-testid") ?? el.getAttribute("aria-label") ?? el.textContent ?? "", box: box(el) }));
+    const root = document.scrollingElement!;
+    return {
+      header: box(header),
+      chip: box(chip),
+      icon: box(chip.querySelector("svg")!),
+      iconWidth: parseFloat(getComputedStyle(chip.querySelector("svg")!).width),
+      titleWidth: header.querySelector('[data-testid="title-text"]')!.getBoundingClientRect().width,
+      label: labelShown ? box(label) : null,
+      labelLines: labelShown ? lines.size : 1,
+      labelClipped: labelShown && label.scrollWidth > label.clientWidth,
+      tooltip: label.title || chip.getAttribute("title"),
+      controls,
+      pageOverflow: root.scrollWidth - root.clientWidth,
+    };
+  });
+}
+
+test("the save chip never overlaps or spills into other header controls at any width", async ({ browser }) => {
+  const alice = await signIn(browser, "alice");
+  try {
+    const { page } = alice;
+    const title = "A long document title that takes all the room the header can give it and then some more";
+    const docId = await createDocument(page, CONTENT, title);
+    await openDocument(page, docId);
+
+    const widths = [390, 768, 820, 900, 1024, 1280, 1440];
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 800 });
+      for (const status of STATUS_CASES) {
+        const step = `${width}px "${status.label}"`;
+        await forceStatus(page, status);
+        const chipEl = page.getByTestId("save-state");
+        await expect(chipEl, step).toHaveAttribute("role", "status");
+        await expect(chipEl, step).toHaveAttribute("data-state", status.state);
+        const m = await measureHeader(page);
+        if (process.env.SHOT_DIR && ["Saved", "Saving…", "Save failed — retry", "Offline — changes will sync"].includes(status.label)) {
+          const name = status.label.replace(/[^a-z]+/gi, "-").replace(/-$/, "").toLowerCase();
+          await page.screenshot({ path: `${process.env.SHOT_DIR}/header-${width}-${name}.png`, clip: { x: 0, y: 0, width, height: 120 } });
+        }
+        // Soft: one run lists every width and state that is wrong.
+        const parts = [{ name: "chip", box: m.chip }, { name: "icon", box: m.icon }, ...(m.label ? [{ name: "label", box: m.label }] : [])];
+        for (const part of parts) {
+          expect.soft(part.box.top, `${step}: ${part.name} top`).toBeGreaterThanOrEqual(m.header.top);
+          expect.soft(part.box.bottom, `${step}: ${part.name} bottom`).toBeLessThanOrEqual(m.header.bottom);
+          for (const control of m.controls) {
+            const apart =
+              part.box.right <= control.box.left + 0.5 ||
+              part.box.left >= control.box.right - 0.5 ||
+              part.box.bottom <= control.box.top + 0.5 ||
+              part.box.top >= control.box.bottom - 0.5;
+            expect.soft(apart, `${step}: ${part.name} ${JSON.stringify(part.box)} overlaps ${control.name} ${JSON.stringify(control.box)}`).toBe(true);
+          }
+        }
+        expect.soft(m.labelLines, `${step}: label lines`).toBe(1);
+        expect.soft(m.iconWidth, `${step}: icon width`).toBe(16);
+        // From 1024 px the longest label still leaves the start of the title on screen.
+        if (width >= 1024) expect.soft(m.titleWidth, `${step}: title width`).toBeGreaterThanOrEqual(40);
+        expect.soft(m.pageOverflow, `${step}: page overflow`).toBeLessThanOrEqual(0);
+        // A shortened label keeps its full text (or the error behind it) one hover away; a label that fits is shown whole.
+        if (m.labelClipped) expect.soft(m.tooltip, `${step}: tooltip`).toBe(status.saveError ?? status.label);
+        if (width >= 1440) expect.soft(m.labelClipped, `${step}: label shown whole`).toBe(false);
+      }
+    }
+
+    // The chip's button and the mode menu still work from the keyboard at the narrowest desktop width.
+    await page.setViewportSize({ width: 768, height: 800 });
+    const save = page.getByRole("button", { name: "Save document", exact: true });
+    await save.focus();
+    await expect(save).toBeFocused();
+    const mode = page.getByTestId("mode-switcher");
+    await mode.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menuitemradio", { name: /Editing/ })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(mode).toBeFocused();
+  } finally {
+    await alice.context.close();
+  }
+});
+
 test("manual Save flushes the current edit and synthetic composition holds autosave", async ({ browser }) => {
   const alice = await signIn(browser, "alice");
   try {

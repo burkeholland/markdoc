@@ -139,7 +139,9 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors",
+        // Never wraps: the title gives up its room first, then the label shortens with "…" (the icon stays).
+        // The cap leaves the title a share of the row next to a long label.
+        "inline-flex min-w-6 max-w-[60%] items-center gap-1.5 rounded-md text-sm font-medium transition-colors",
         visual.className,
         flash && "save-state-recovered",
       )}
@@ -154,7 +156,7 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
     >
       <button
         type="button"
-        className="header-save-button tap-target relative inline-flex min-h-6 min-w-6 items-center justify-center gap-1.5"
+        className="header-save-button tap-target relative inline-flex min-h-6 min-w-6 items-center justify-center gap-1.5 [&>svg]:shrink-0"
         disabled={!canEdit || manualPending}
         aria-busy={manualPending || undefined}
         aria-label="Save document"
@@ -162,7 +164,10 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       >
         {visual.icon}
         {/* Phones show the icon only; the server markup uses the same responsive label. */}
-        <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{manualError ?? label}</span>
+        {/* A shortened label keeps its full text on hover; an error keeps the chip's own tooltip. */}
+        <span className={cn(compact ? "sr-only" : "min-w-0 truncate max-md:sr-only")} title={compact || manualError || saveError ? undefined : label}>
+          {manualError ?? label}
+        </span>
       </button>
     </span>
   );
@@ -243,7 +248,7 @@ export function TitleEditor({ session, fallback, compact }: { session: CollabSes
         if (!canEdit || event.button !== 0) return;
         setStoredEdit((current) => current ?? { generation: {}, session, draft: title });
       }}
-      className={cn("group editor-header-title flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left max-md:px-0.5", canEdit && "hover:bg-surface-3")}
+      className={cn("group editor-header-title flex min-w-0 shrink-[100000] items-center gap-2 rounded-lg px-2 py-1 text-left max-md:px-0.5", canEdit && "hover:bg-surface-3")}
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
