@@ -2,8 +2,9 @@ import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
-import type { Folder, Role } from "@/server/db/schema";
-import { changeDocumentFolderAccess, withFolderAccessLock } from "@/server/collab/authorization";
+import type { Folder, LinkAccess, Role } from "@/server/db/schema";
+import { changeDocumentFolderAccess, changeFolderLinkAccess, withFolderAccessLock } from "@/server/collab/authorization";
+import { effectiveRole, effectiveRoleSql, roleFromLink, type AccessSource } from "@/server/document-access";
 import { deleteDocument } from "@/server/documents";
 import { boundFolderName } from "@/lib/folder-name";
 
@@ -22,6 +23,7 @@ export interface FolderSummary {
   ownerName: string | null;
   ownerLogin: string | null;
   role: Role;
+  linkAccess: LinkAccess;
 }
 
 /** A create can fail on the name; a rename can additionally hit a folder the caller does not own. */
@@ -58,6 +60,7 @@ export async function listFoldersForUser(ownerId: string, userLogin: string | nu
     .select({
       id: schema.folders.id,
       name: schema.folders.name,
+      linkAccess: schema.folders.linkAccess,
       createdAt: schema.folders.createdAt,
       updatedAt: schema.folders.updatedAt,
       ownerId: schema.folders.ownerId,
@@ -78,6 +81,7 @@ export async function listFoldersForUser(ownerId: string, userLogin: string | nu
         .select({
           id: schema.folders.id,
           name: schema.folders.name,
+          linkAccess: schema.folders.linkAccess,
           createdAt: schema.folders.createdAt,
           updatedAt: schema.folders.updatedAt,
           ownerId: schema.folders.ownerId,
@@ -95,7 +99,10 @@ export async function listFoldersForUser(ownerId: string, userLogin: string | nu
         .orderBy(asc(sql`lower(${schema.folders.name})`))
     : Promise.resolve([]);
   const [ownedFolders, sharedFolders] = await Promise.all([owned, shared]);
-  return [...ownedFolders, ...sharedFolders];
+  return [...ownedFolders, ...sharedFolders.map((folder) => ({
+    ...folder,
+    role: effectiveRole({ owner: false, directRole: folder.role, folderRole: null, linkRole: roleFromLink(folder.linkAccess, true) })!.role,
+  }))];
 }
 
 /** One folder, only if this user owns it. */
@@ -110,7 +117,87 @@ export async function getFolderForOwner(folderId: string, ownerId: string): Prom
 
 /** A folder summary for its owner or a person with a folder role. */
 export async function getFolderForUser(folderId: string, userId: string, login: string | null): Promise<FolderSummary | null> {
-  return (await listFoldersForUser(userId, login)).find((folder) => folder.id === folderId) ?? null;
+  return (await getFolderAccess(folderId, { id: userId, login }))?.folder ?? null;
+}
+
+export async function getFolderAccess(folderId: string, user: { id: string; login: string | null } | null) {
+  const db = await getDb();
+  const [row] = await db.select({
+    id: schema.folders.id, name: schema.folders.name, linkAccess: schema.folders.linkAccess,
+    ownerId: schema.folders.ownerId, ownerName: schema.users.name, ownerLogin: schema.users.login,
+    createdAt: schema.folders.createdAt, updatedAt: schema.folders.updatedAt,
+    documentCount: sql<number>`(select count(*)::int from ${schema.documents} where ${schema.documents.folderId} = ${schema.folders.id} and ${schema.documents.deletedAt} is null)`,
+  }).from(schema.folders).innerJoin(schema.users, eq(schema.users.id, schema.folders.ownerId)).where(eq(schema.folders.id, folderId)).limit(1);
+  if (!row) return null;
+  const access = effectiveRole({
+    owner: row.ownerId === user?.id,
+    directRole: user?.login ? await getFolderCollaboratorRole(folderId, user.login) : null,
+    folderRole: null,
+    linkRole: roleFromLink(row.linkAccess, user !== null),
+  });
+  return access ? { folder: { ...row, role: access.role }, role: access.role, source: access.source } : null;
+}
+
+/** Call only after checking folder access; public links do not make folders globally discoverable. */
+export async function listDocumentsInFolder(folderId: string, user: { id: string; login: string | null } | null) {
+  const db = await getDb();
+  const access = effectiveRoleSql(schema.documents, user ? { ...user, signedIn: true } : null);
+  return db.select({
+    id: schema.documents.id, title: schema.documents.title, updatedAt: schema.documents.updatedAt,
+    role: access.role, source: access.source,
+  }).from(schema.documents).where(and(
+    eq(schema.documents.folderId, folderId), isNull(schema.documents.deletedAt), sql`${access.role} is not null`,
+  )).orderBy(asc(schema.documents.title));
+}
+
+export async function setFolderLinkAccess(folderId: string, ownerId: string, linkAccess: LinkAccess): Promise<Folder | null> {
+  let updated: Folder | null = null;
+  await changeFolderLinkAccess(folderId, async () => {
+    const db = await getDb();
+    const [row] = await db.update(schema.folders).set({ linkAccess, updatedAt: new Date() })
+      .where(and(eq(schema.folders.id, folderId), eq(schema.folders.ownerId, ownerId))).returning();
+    updated = row ?? null;
+  });
+  return updated;
+}
+
+export interface FolderAccessException {
+  documentId: string;
+  documentTitle: string;
+  role: Exclude<Role, "owner">;
+  source: AccessSource;
+}
+
+/** Owner-only disclosure data: current direct grants and both link sources can outrank a proposed folder role. */
+export async function folderAccessExceptions(
+  folder: Pick<Folder, "id" | "linkAccess">,
+  grants: { login: string; role: Exclude<Role, "owner"> }[],
+): Promise<Record<string, FolderAccessException[]>> {
+  if (grants.length === 0) return {};
+  const db = await getDb();
+  const logins = [...new Set(grants.map((grant) => normalizeCollaboratorLogin(grant.login)))];
+  const [documents, direct] = await Promise.all([
+    db.select({ id: schema.documents.id, title: schema.documents.title, linkAccess: schema.documents.linkAccess })
+      .from(schema.documents).where(and(eq(schema.documents.folderId, folder.id), isNull(schema.documents.deletedAt))).orderBy(asc(schema.documents.title)),
+    db.select({ documentId: schema.collaborators.documentId, login: schema.collaborators.login, role: schema.collaborators.role })
+      .from(schema.collaborators).innerJoin(schema.documents, eq(schema.documents.id, schema.collaborators.documentId))
+      .where(and(eq(schema.documents.folderId, folder.id), isNull(schema.documents.deletedAt), inArray(sql`lower(${schema.collaborators.login})`, logins))),
+  ]);
+  const directRoles = new Map(direct.map((grant) => [`${grant.documentId}:${grant.login.toLowerCase()}`, grant.role]));
+  const rank = { viewer: 0, commenter: 1, editor: 2, owner: 3 };
+  return Object.fromEntries(grants.map((grant) => {
+    const login = normalizeCollaboratorLogin(grant.login);
+    const exceptions = documents.flatMap((document): FolderAccessException[] => {
+      const access = effectiveRole({
+        owner: false, directRole: directRoles.get(`${document.id}:${login}`) ?? null, folderRole: grant.role,
+        linkRole: roleFromLink(document.linkAccess, true), folderLinkRole: roleFromLink(folder.linkAccess, true),
+      });
+      return access && access.role !== "owner" && rank[access.role] > rank[grant.role]
+        ? [{ documentId: document.id, documentTitle: document.title, role: access.role, source: access.source }]
+        : [];
+    });
+    return [login, exceptions];
+  }));
 }
 
 /** Direct folder roles only; inherited document roles are resolved separately. */

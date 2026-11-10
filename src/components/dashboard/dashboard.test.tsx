@@ -113,6 +113,7 @@ function folder(id: string, name: string, documentCount: number): FolderDto {
     ownerName: USER.name,
     ownerLogin: USER.login,
     role: "owner",
+    linkAccess: "private",
   };
 }
 

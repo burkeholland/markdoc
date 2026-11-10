@@ -1,5 +1,5 @@
 import type { Document } from "@/server/db/schema";
-import type { Role } from "@/server/db/schema";
+import type { LinkAccess, Role } from "@/server/db/schema";
 import type { DocumentMeta } from "@/server/documents";
 import { githubUrlFor } from "@/server/publish";
 
@@ -47,6 +47,7 @@ export function folderDto(folder: {
   ownerName?: string | null;
   ownerLogin?: string | null;
   role?: Role;
+  linkAccess?: LinkAccess;
 }) {
   return {
     id: folder.id,
@@ -58,5 +59,6 @@ export function folderDto(folder: {
     ownerName: folder.ownerName ?? null,
     ownerLogin: folder.ownerLogin ?? null,
     role: folder.role ?? "owner",
+    linkAccess: folder.linkAccess ?? "private",
   };
 }

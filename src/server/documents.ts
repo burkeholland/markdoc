@@ -223,7 +223,7 @@ function visibleDocuments<E extends Partial<typeof schema.documents._.columns> =
       doc: { ...summaryColumns, ...(extra ?? ({} as E)) },
       owner: { name: schema.users.name, login: schema.users.login },
       effectiveRole: access.role,
-      folderRole: access.folderRole,
+      folderRole: sql<Exclude<Role, "owner"> | null>`coalesce(${access.folderRole}, ${access.folderLinkRole})`,
       starred: schema.stars.starred,
       lastOpenedAt: schema.recents.openedAt,
     })
@@ -232,7 +232,7 @@ function visibleDocuments<E extends Partial<typeof schema.documents._.columns> =
     .leftJoin(schema.folders, eq(schema.folders.id, schema.documents.folderId))
     .leftJoin(schema.stars, and(eq(schema.stars.documentId, schema.documents.id), eq(schema.stars.userId, user.id)))
     .leftJoin(schema.recents, and(eq(schema.recents.documentId, schema.documents.id), eq(schema.recents.userId, user.id)));
-  const openedViaLink = and(isNotNull(schema.recents.documentId), ne(schema.documents.linkAccess, "private"));
+  const openedViaLink = and(isNotNull(schema.recents.documentId), sql`${access.role} is not null`);
   const visible = and(
     or(sql`${memberAccess.role} is not null`, openedViaLink),
     isNull(schema.documents.deletedAt),

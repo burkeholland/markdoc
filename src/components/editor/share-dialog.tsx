@@ -342,8 +342,8 @@ export const ShareDialog = memo(function ShareDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={accessRequest ? "Access request" : `Share “${doc.title}”`}
-        description={accessRequest ? `${requestLabel} requested access to “${doc.title}”.` : "Add people by GitHub handle. They sign in with GitHub."}
+        title={accessRequest ? `Share document “${doc.title}”` : `Share “${doc.title}”`}
+        description={accessRequest ? `${requestLabel} requested access to this document.` : "Add people by GitHub handle. They sign in with GitHub."}
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
         closeButtonClassName="max-sm:min-h-11 max-sm:min-w-11"
         onClosed={() => {
@@ -355,7 +355,7 @@ export const ShareDialog = memo(function ShareDialog({
       >
         {accessRequest ? (
           <div className="flex flex-col gap-4" data-testid="access-request">
-            <p className="text-sm text-ink-2">Granting gives view access only.</p>
+            <p className="text-sm text-ink-2">Adds a View grant on this document only. Higher access from other grants is kept.</p>
             {!validRequestLogin && <div className={ERROR_CLASS} role="alert">This request does not include a valid GitHub handle.</div>}
             {requestError && <div className={ERROR_CLASS} role="alert" data-testid="access-request-error">{requestError}</div>}
             {!isOwner && <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>}
@@ -442,7 +442,9 @@ export const ShareDialog = memo(function ShareDialog({
             <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3 py-2.5 text-xs text-ink-3" data-testid="folder-inherited-access">
               <Folder size={14} className="mt-0.5 shrink-0 text-ink-2" aria-hidden="true" />
               <p>
-                People shared with <span className="font-medium text-ink-2">{folder.name}</span> also have access to this document. Manage folder access from its menu on the dashboard.
+                This document inherits access from folder <a className="font-medium text-accent underline" href={`/f/${folder.id}?share=1`}>{folder.name}</a>.
+                {folder.linkAccess !== "private" && <> Folder link access: {folder.linkAccess}. Signed-out visitors can only view.</>}
+                {" "}The highest applicable permission wins. Changing this document&apos;s grants does not reduce higher folder access.
               </p>
             </div>
           )}

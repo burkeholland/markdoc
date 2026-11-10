@@ -1,14 +1,20 @@
 import type { NotificationDto } from "@/lib/api";
 
-/** Where a notification leads: its document, with a thread or access request to activate when needed. */
-export function notificationHref(n: Pick<NotificationDto, "kind" | "documentId" | "refId" | "id" | "actorLogin" | "readAt">): string {
-  if (n.kind === "share") return `/d/${n.documentId}`;
+type NotificationDestination = Pick<NotificationDto, "kind" | "refId" | "id" | "actorLogin" | "readAt"> & (
+  | { resource?: "document"; documentId: string }
+  | { resource: "folder"; documentId: null; folderId: string }
+);
+
+/** Requests open the exact resource's Share pane; thread notifications keep their document context. */
+export function notificationHref(n: NotificationDestination): string {
+  const target = n.resource === "folder" ? `/f/${n.folderId}` : `/d/${n.documentId}`;
+  if (n.kind === "share") return target;
   if (n.kind === "access.request") {
     if (!n.readAt && n.actorLogin) {
       const params = new URLSearchParams({ accessRequest: n.actorLogin, notification: n.id });
-      return `/d/${n.documentId}?${params.toString()}`;
+      return `${target}?${params.toString()}`;
     }
-    return `/d/${n.documentId}?share=1`;
+    return `${target}?share=1`;
   }
-  return `/d/${n.documentId}?thread=${encodeURIComponent(n.refId)}`;
+  return `${target}?thread=${encodeURIComponent(n.refId)}`;
 }

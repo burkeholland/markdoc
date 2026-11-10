@@ -142,11 +142,9 @@ export async function recordMentions(docId: string, commentId: string, byLogin: 
   return n;
 }
 
-export interface NotificationItem {
+interface NotificationBase {
   id: string;
   kind: NotificationKind;
-  documentId: string;
-  documentTitle: string;
   actorLogin: string | null;
   actorName: string | null;
   refId: string;
@@ -155,6 +153,10 @@ export interface NotificationItem {
   createdAt: Date;
   readAt: Date | null;
 }
+export type NotificationItem = NotificationBase & (
+  | { resource?: "document"; documentId: string; documentTitle: string; folderId?: never; folderName?: never }
+  | { resource: "folder"; documentId: null; documentTitle: null; folderId: string; folderName: string }
+);
 
 export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "suggestion.accepted", "review", "share", "access.request", "request.done", "webhook.disabled"];
 
@@ -177,6 +179,13 @@ const mentionDocumentAccessWhere = (login: string) => {
 
 const visibleNotificationWhere = (login: string) =>
   and(isNull(schema.documents.deletedAt), or(ne(schema.notifications.kind, "mention"), mentionDocumentAccessWhere(login)));
+
+const folderUserWhere = (login: string) => eq(schema.folderNotifications.userLogin, login.toLowerCase());
+const visibleFolderNotificationWhere = (login: string) => {
+  const owner = sql`${schema.folders.ownerId} in (select ${schema.users.id} from ${schema.users} where lower(${schema.users.login}) = ${login.toLowerCase()})`;
+  const collaborator = sql`exists (select 1 from ${schema.folderCollaborators} where ${schema.folderCollaborators.folderId} = ${schema.folders.id} and lower(${schema.folderCollaborators.login}) = ${login.toLowerCase()})`;
+  return or(owner, and(eq(schema.folderNotifications.kind, "share"), or(ne(schema.folders.linkAccess, "private"), collaborator)));
+};
 
 /** The user's notifications, newest first, plus their total unread count. */
 export async function listNotifications(login: string, opts: { unread?: boolean; limit?: number; kind?: NotificationKind } = {}): Promise<NotificationPage> {
@@ -204,7 +213,22 @@ export async function listNotifications(login: string, opts: { unread?: boolean;
     .where(and(...conds))
     .orderBy(desc(schema.notifications.createdAt), desc(schema.notifications.id))
     .limit(limit);
-  return { items, unreadCount: await unreadCount(login, opts.kind) };
+  const folderConds = [folderUserWhere(login), visibleFolderNotificationWhere(login)];
+  if (opts.unread) folderConds.push(isNull(schema.folderNotifications.readAt));
+  if (opts.kind) folderConds.push(sql`${schema.folderNotifications.kind} = ${opts.kind}`);
+  const folderItems = await db.select({
+    id: schema.folderNotifications.id, kind: schema.folderNotifications.kind,
+    folderId: schema.folderNotifications.folderId, folderName: schema.folders.name,
+    actorLogin: schema.folderNotifications.actorLogin, actorName: schema.folderNotifications.actorName,
+    refId: schema.folderNotifications.refId, snippet: schema.folderNotifications.snippet,
+    createdAt: schema.folderNotifications.createdAt, readAt: schema.folderNotifications.readAt,
+  }).from(schema.folderNotifications).innerJoin(schema.folders, eq(schema.folders.id, schema.folderNotifications.folderId))
+    .where(and(...folderConds)).orderBy(desc(schema.folderNotifications.createdAt), desc(schema.folderNotifications.id)).limit(limit);
+  const merged: NotificationItem[] = [...items, ...folderItems.map((item) => ({
+    ...item, resource: "folder" as const, documentId: null, documentTitle: null, agentTargets: null,
+  }))];
+  merged.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id));
+  return { items: merged.slice(0, limit), unreadCount: await unreadCount(login, opts.kind) };
 }
 
 export async function unreadCount(login: string, kind?: NotificationKind): Promise<number> {
@@ -216,7 +240,11 @@ export async function unreadCount(login: string, kind?: NotificationKind): Promi
     .from(schema.notifications)
     .innerJoin(schema.documents, eq(schema.documents.id, schema.notifications.documentId))
     .where(and(...conds));
-  return row?.n ?? 0;
+  const [folderRow] = await db.select({ n: sql<number>`count(*)::int` })
+    .from(schema.folderNotifications).innerJoin(schema.folders, eq(schema.folders.id, schema.folderNotifications.folderId))
+    .where(and(folderUserWhere(login), isNull(schema.folderNotifications.readAt), visibleFolderNotificationWhere(login),
+      kind ? sql`${schema.folderNotifications.kind} = ${kind}` : undefined));
+  return (row?.n ?? 0) + (folderRow?.n ?? 0);
 }
 
 /** Mark one notification read. Only its recipient may; returns false if nothing changed. */
@@ -228,7 +256,11 @@ export async function markNotificationRead(id: string, login: string, documentId
     .set({ readAt: new Date() })
     .where(and(eq(schema.notifications.id, id), userWhere(login), isNull(schema.notifications.readAt), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .returning();
-  return updated.length > 0;
+  if (updated.length > 0) return true;
+  if (documentIds) return false;
+  const folderUpdated = await db.update(schema.folderNotifications).set({ readAt: new Date() })
+    .where(and(eq(schema.folderNotifications.id, id), folderUserWhere(login), isNull(schema.folderNotifications.readAt))).returning();
+  return folderUpdated.length > 0;
 }
 
 /** True when the notification exists and is addressed to `login`, whether or not it has been read. */
@@ -240,7 +272,11 @@ export async function notificationBelongsTo(id: string, login: string, documentI
     .from(schema.notifications)
     .where(and(eq(schema.notifications.id, id), userWhere(login), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .limit(1);
-  return Boolean(row);
+  if (row) return true;
+  if (documentIds) return false;
+  const [folderRow] = await db.select({ id: schema.folderNotifications.id }).from(schema.folderNotifications)
+    .where(and(eq(schema.folderNotifications.id, id), folderUserWhere(login))).limit(1);
+  return Boolean(folderRow);
 }
 
 /** Mark all of the user's unread notifications read, optionally within a token's document boundary. */
@@ -252,7 +288,10 @@ export async function markAllNotificationsRead(login: string, documentIds?: stri
     .set({ readAt: new Date() })
     .where(and(userWhere(login), isNull(schema.notifications.readAt), documentIds ? inArray(schema.notifications.documentId, documentIds) : undefined))
     .returning();
-  return updated.length;
+  if (documentIds) return updated.length;
+  const foldersUpdated = await db.update(schema.folderNotifications).set({ readAt: new Date() })
+    .where(and(folderUserWhere(login), isNull(schema.folderNotifications.readAt))).returning();
+  return updated.length + foldersUpdated.length;
 }
 
 /** Mark read every unread notification of the user that points at one of `refIds` (a thread and its replies, say). */
@@ -360,6 +399,30 @@ export async function notifySuggestionDecision(docId: string, suggestion: Pick<S
 /** `share`: the person a document was just shared with. */
 export async function notifyShare(docId: string, login: string, role: string, actor: Actor): Promise<boolean> {
   return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${login.toLowerCase()}`, snippet: role });
+}
+
+async function notifyFolder(folderId: string, login: string, kind: "share" | "access.request", actor: { login?: string | null; name?: string | null }, snippet = ""): Promise<boolean> {
+  const userLogin = login.trim().toLowerCase();
+  if (!userLogin || actor.login?.toLowerCase() === userLogin) return false;
+  const db = await getDb();
+  const rows = await db.insert(schema.folderNotifications).values({
+    id: newId(), folderId, userLogin, kind,
+    actorLogin: actor.login ?? null, actorName: actor.name ?? actor.login ?? null,
+    refId: `${folderId}:${kind === "share" ? userLogin : actor.login?.toLowerCase()}`, snippet: snippetOf(snippet),
+  }).onConflictDoNothing({ target: [schema.folderNotifications.userLogin, schema.folderNotifications.kind, schema.folderNotifications.refId] }).returning();
+  return rows.length > 0;
+}
+
+export async function notifyFolderShare(folderId: string, login: string, role: string, actor: { login?: string | null; name?: string | null }): Promise<boolean> {
+  return notifyFolder(folderId, login, "share", actor, role);
+}
+
+export async function notifyFolderAccessRequest(folderId: string, actor: { login?: string | null; name?: string | null }): Promise<boolean> {
+  if (!actor.login) return false;
+  const db = await getDb();
+  const [owner] = await db.select({ login: schema.users.login }).from(schema.folders)
+    .innerJoin(schema.users, eq(schema.users.id, schema.folders.ownerId)).where(eq(schema.folders.id, folderId)).limit(1);
+  return owner?.login ? notifyFolder(folderId, owner.login, "access.request", actor) : false;
 }
 
 /**

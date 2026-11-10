@@ -25,6 +25,6 @@ export const GET = handler(async (req: Request) => {
   });
   const page = await listNotifications(user.login, { unread, limit, kind });
   // A document-restricted token only hears about its documents.
-  const items = page.items.filter((n) => tokenAllowsDocument(user, n.documentId)).map(toDto);
+  const items = page.items.filter((n) => n.resource === "folder" ? !user.documentIds?.length : tokenAllowsDocument(user, n.documentId)).map(toDto);
   return json({ items, unreadCount: user.documentIds?.length ? items.filter((n) => !n.readAt).length : page.unreadCount });
 });

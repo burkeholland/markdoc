@@ -1,6 +1,7 @@
 import type { DocumentDto, FolderDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
-import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/server/db/schema";
+import type { ActivityAction, LinkAccess, NotificationKind, Role, TokenScope } from "@/server/db/schema";
+import type { FolderAccessException } from "@/server/folders";
 import type { ReviewDto } from "@/server/reviews";
 import type { GistAutoUpdatePreview, GistAutoUpdateSettings, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
 import { readJsonResponse } from "@/lib/json-response";
@@ -101,11 +102,9 @@ export interface GitHubUserDto {
   avatarUrl: string;
 }
 
-export interface NotificationDto {
+interface NotificationBaseDto {
   id: string;
   kind: NotificationKind;
-  documentId: string;
-  documentTitle: string;
   actorLogin: string | null;
   actorName: string | null;
   /** Thread, reply or suggestion id; `<docId>:<login>` for shares and access requests. */
@@ -114,6 +113,10 @@ export interface NotificationDto {
   createdAt: string;
   readAt: string | null;
 }
+export type NotificationDto = NotificationBaseDto & (
+  | { resource?: "document"; documentId: string; documentTitle: string; folderId?: never; folderName?: never }
+  | { resource: "folder"; documentId: null; documentTitle: null; folderId: string; folderName: string }
+);
 
 export interface NotificationsPageDto {
   items: NotificationDto[];
@@ -251,7 +254,7 @@ export const api = {
       request<{
         owner: { login: string | null; name: string | null; image: string | null } | null;
         linkAccess: DocumentDto["linkAccess"];
-        folder: { id: string; name: string } | null;
+        folder: { id: string; name: string; linkAccess: LinkAccess } | null;
         collaborators: CollaboratorDto[];
         /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts `MentionableAgent`). */
         agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean; collaboratorsMayAsk: boolean }[];
@@ -316,7 +319,15 @@ export const api = {
       request<{
         owner: { login: string | null; name: string | null; image: string | null } | null;
         collaborators: CollaboratorDto[];
+        linkAccess: LinkAccess;
+        exceptions: Record<string, FolderAccessException[]>;
       }>(`/api/folders/${id}/collaborators`),
+    accessPreview: (id: string, login: string, role: Exclude<Role, "owner">, init?: RequestInit) =>
+      request<{ login: string; role: Exclude<Role, "owner">; exceptions: FolderAccessException[] }>(
+        `/api/folders/${id}/access-preview?${new URLSearchParams({ login, role })}`, { ...init, cache: "no-store" },
+      ),
+    updateLinkAccess: (id: string, linkAccess: LinkAccess) =>
+      request<{ folder: FolderDto }>(`/api/folders/${id}`, { method: "PATCH", body: JSON.stringify({ linkAccess }) }),
     addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">, options: { change?: boolean } = {}) =>
       request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/folders/${id}/collaborators`, {
         method: "POST",

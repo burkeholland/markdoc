@@ -550,7 +550,8 @@ export function useNotificationsPolling() {
   useEffect(() => subscribe(() => {}), []);
 }
 
-export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "snippet">): string {
+export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "snippet"> & { resource?: "document" | "folder"; folderName?: string }): string {
+  const resource = n.resource === "folder" ? `folder \u2018${n.folderName}\u2019` : `document \u2018${n.documentTitle}\u2019`;
   switch (n.kind) {
     case "mention":
       return "mentioned you";
@@ -569,9 +570,9 @@ export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "sn
     case "review":
       return `reviewed \u2018${n.documentTitle}\u2019${n.snippet ? ` \u2014 ${n.snippet}` : ""}`;
     case "share":
-      return `shared \u2018${n.documentTitle}\u2019 with you${n.snippet ? ` as ${n.snippet}` : ""}`;
+      return `shared ${resource} with you${n.snippet ? ` as ${n.snippet}` : ""}`;
     case "access.request":
-      return `requested access to \u2018${n.documentTitle}\u2019`;
+      return `requested access to ${resource}`;
     case "request.done":
       return `finished your request${n.snippet ? `: ${n.snippet}` : ""}`;
     case "webhook.disabled":

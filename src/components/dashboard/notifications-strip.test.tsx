@@ -171,7 +171,7 @@ describe("notification strip presentation", () => {
     expect(mention).toHaveTextContent("Alice mentioned you in Launch plan");
     expect(within(mention!).getByTestId("notification-doc-title")).toHaveTextContent(ITEM.documentTitle);
     expect(mention!.querySelector("time")).toHaveAttribute("datetime", ITEM.createdAt);
-    expect(share).toHaveTextContent("@bob shared ‘Shared brief’ with you as viewer");
+    expect(share).toHaveTextContent("@bob shared document ‘Shared brief’ with you as viewer");
     expect(within(share!).queryByTestId("notification-doc-title")).toBeNull();
     expect(share!.querySelectorAll(".truncate, span[title]")).toHaveLength(0);
     expect(anonymous).toHaveTextContent("Someone mentioned you");

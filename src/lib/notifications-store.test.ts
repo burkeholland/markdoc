@@ -14,7 +14,7 @@ const notificationApi = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => ({ api: { notifications: notificationApi } }));
 
 const EMPTY_PAGE: NotificationsPageDto = { items: [], unreadCount: 0 };
-const ITEM: NotificationDto = {
+const ITEM: Extract<NotificationDto, { documentId: string }> = {
   id: "notification-one",
   kind: "mention",
   documentId: "document-one",
