@@ -254,6 +254,9 @@ async function measureHeader(page: Page) {
       .filter((el) => !chip.contains(el) && el.checkVisibility({ visibilityProperty: true }))
       .map((el) => ({ name: el.getAttribute("data-testid") ?? el.getAttribute("aria-label") ?? el.textContent ?? "", box: box(el) }));
     const root = document.scrollingElement!;
+    // The tooltip a pointer resting on the label gets: the nearest `title` at or above whatever is hit there.
+    const labelBox = label.getBoundingClientRect();
+    const hit = labelShown ? document.elementFromPoint(labelBox.left + labelBox.width / 2, labelBox.top + labelBox.height / 2) : null;
     return {
       header: box(header),
       chip: box(chip),
@@ -263,7 +266,8 @@ async function measureHeader(page: Page) {
       label: labelShown ? box(label) : null,
       labelLines: labelShown ? lines.size : 1,
       labelClipped: labelShown && label.scrollWidth > label.clientWidth,
-      tooltip: label.title || chip.getAttribute("title"),
+      hitInChip: hit ? chip.contains(hit) : false,
+      tooltip: hit?.closest("[title]")?.getAttribute("title") ?? null,
       controls,
       pageOverflow: root.scrollWidth - root.clientWidth,
     };
@@ -271,6 +275,7 @@ async function measureHeader(page: Page) {
 }
 
 test("the save chip never overlaps or spills into other header controls at any width", async ({ browser }) => {
+  test.skip(Boolean(process.env.PROD_BASE_URL), "Requires the session hook that only non-production builds expose");
   const alice = await signIn(browser, "alice");
   try {
     const { page } = alice;
@@ -312,7 +317,10 @@ test("the save chip never overlaps or spills into other header controls at any w
         if (width >= 1024) expect.soft(m.titleWidth, `${step}: title width`).toBeGreaterThanOrEqual(40);
         expect.soft(m.pageOverflow, `${step}: page overflow`).toBeLessThanOrEqual(0);
         // A shortened label keeps its full text (or the error behind it) one hover away; a label that fits is shown whole.
-        if (m.labelClipped) expect.soft(m.tooltip, `${step}: tooltip`).toBe(status.saveError ?? status.label);
+        if (m.labelClipped) {
+          expect.soft(m.hitInChip, `${step}: pointer on the label hits the chip`).toBe(true);
+          expect.soft(m.tooltip, `${step}: tooltip`).toBe(status.saveError ?? status.label);
+        }
         if (width >= 1440) expect.soft(m.labelClipped, `${step}: label shown whole`).toBe(false);
       }
     }

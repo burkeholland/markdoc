@@ -160,14 +160,14 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
         disabled={!canEdit || manualPending}
         aria-busy={manualPending || undefined}
         aria-label="Save document"
+        // On the button, which the tap-target overlay makes the hover target: a shortened label keeps its full text
+        // on hover. Errors and phones leave it to the chip's own tooltip.
+        title={compact || manualError || saveError ? undefined : label}
         onClick={onSave}
       >
         {visual.icon}
         {/* Phones show the icon only; the server markup uses the same responsive label. */}
-        {/* A shortened label keeps its full text on hover; an error keeps the chip's own tooltip. */}
-        <span className={cn(compact ? "sr-only" : "min-w-0 truncate max-md:sr-only")} title={compact || manualError || saveError ? undefined : label}>
-          {manualError ?? label}
-        </span>
+        <span className={cn(compact ? "sr-only" : "min-w-0 truncate max-md:sr-only")}>{manualError ?? label}</span>
       </button>
     </span>
   );
