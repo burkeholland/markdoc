@@ -57,6 +57,75 @@ for (const { from, to } of [
   });
 }
 
+for (const { from, to } of [
+  { from: "private", to: "view" },
+  { from: "view", to: "private" },
+] as const) {
+  test(`older collaborator response cannot replace confirmed folder link ${from} -> ${to}`, async ({ browser }) => {
+    const owner = await signIn(browser, uniqueLogin("folder-refresh-owner"));
+    const reader = await signIn(browser, uniqueLogin("folder-refresh-reader"));
+    const page = owner.page;
+    const documentId = await createDocument(page, "# Budget\n", "Budget");
+    const created = await page.request.post("/api/folders", { data: { name: "Ordered folder sharing" } });
+    expect(created.ok()).toBeTruthy();
+    const { folder } = await created.json() as { folder: { id: string } };
+    const apiPath = `/api/folders/${folder.id}`;
+    expect((await page.request.post("/api/documents/move", { data: { documentIds: [documentId], folderId: folder.id } })).ok()).toBeTruthy();
+    expect((await page.request.post(`/api/documents/${documentId}/collaborators`, { data: { login: reader.login, role: "editor" } })).ok()).toBeTruthy();
+    if (from !== "private") expect((await page.request.patch(apiPath, { data: { linkAccess: from } })).ok()).toBeTruthy();
+    await page.goto(`/f/${folder.id}?share=1`);
+    const dialog = page.getByRole("dialog", { name: "Share folder “Ordered folder sharing”" });
+    const select = dialog.getByTestId("folder-link-access");
+    await expect(select).toBeEnabled();
+    let releaseOld!: () => void;
+    let capturedOld!: () => void;
+    const oldReady = new Promise<void>((resolve) => { capturedOld = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let delayNext = true;
+    let oldSnapshot: { linkAccess: string; collaborators: { login: string }[] } | undefined;
+    await page.route(`**${apiPath}/collaborators`, async (route) => {
+      if (route.request().method() !== "GET" || !delayNext) return route.continue();
+      delayNext = false;
+      const response = await route.fetch();
+      oldSnapshot = await response.json();
+      capturedOld();
+      await gate;
+      await route.fulfill({ response });
+    });
+    const mutations: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() !== "GET" && (path === apiPath || path === `${apiPath}/collaborators`)) mutations.push(`${request.method()} ${request.postData()}`);
+    });
+    try {
+      await dialog.getByRole("combobox", { name: "Role for new folder collaborator" }).selectOption("viewer");
+      await dialog.getByTestId("share-login").fill(reader.login);
+      await expect(dialog.getByTestId("folder-access-exceptions")).toContainText("Edit on Budget via direct document grant");
+      await dialog.getByTestId("folder-share-add").click();
+      await oldReady;
+      expect(oldSnapshot?.linkAccess).toBe(from);
+      expect(oldSnapshot?.collaborators.map((person) => person.login)).toEqual([reader.login]);
+      await expect(select).toBeEnabled();
+      await select.selectOption(to);
+      await expect(select).toBeEnabled();
+      await expect(select).toHaveValue(to);
+      await expect(dialog.getByTestId("folder-access-exceptions")).toContainText(`Folder grant: View for @${reader.login}`);
+      const oldDelivered = page.waitForResponse((response) =>
+        response.request().method() === "GET" && new URL(response.url()).pathname === `${apiPath}/collaborators`);
+      releaseOld();
+      await oldDelivered;
+      await expect(dialog.getByTestId("folder-share-add")).toHaveText("Add");
+      expect((await (await page.request.get(apiPath, { maxRetries: 1 })).json()).folder.linkAccess).toBe(to);
+      await expect(select).toHaveValue(to);
+      await expect(dialog.getByTestId("folder-access-exceptions")).toContainText("Edit on Budget via direct document grant");
+      expect((await (await reader.page.request.get(`/api/documents/${documentId}`)).json()).role).toBe("editor");
+      expect(mutations).toEqual([`POST ${JSON.stringify({ login: reader.login, role: "viewer" })}`, `PATCH ${JSON.stringify({ linkAccess: to })}`]);
+    } finally {
+      releaseOld();
+    }
+  });
+}
+
 test("folder links disclose stronger document grants before saving, preserve them afterward, and revoke only inherited access", async ({ browser }, testInfo) => {
   const owner = await signIn(browser, uniqueLogin("folder-owner"));
   const reader = await signIn(browser, uniqueLogin("folder-reader"));

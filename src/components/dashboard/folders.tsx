@@ -519,6 +519,8 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   const roleSelect = React.useRef<HTMLSelectElement>(null);
   const loginInput = React.useRef<CollaboratorLoginInputHandle>(null);
   const currentFolder = React.useRef<string | null>(folder?.id ?? null);
+  // Loads, retries, and mutation refreshes share one response order.
+  const peopleRequest = React.useRef(0);
   const focusRole = React.useCallback(() => roleSelect.current?.focus(), []);
   const folderId = folder?.id ?? null;
   const requestId = accessRequest?.notificationId ?? accessRequest?.login ?? null;
@@ -541,20 +543,22 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   React.useEffect(() => {
     if (!folderId) return;
     let stale = false;
+    const request = ++peopleRequest.current;
     setLoading(true);
     setLoadError(null);
     api.folders.collaborators(folderId).then(
       (result) => {
-        if (!stale) setPeople(result);
+        if (!stale && peopleRequest.current === request) setPeople(result);
       },
       (error: unknown) => {
-        if (!stale) setLoadError(apiErrorText(error, "Could not load folder access."));
+        if (!stale && peopleRequest.current === request) setLoadError(apiErrorText(error, "Could not load folder access."));
       },
     ).finally(() => {
-      if (!stale) setLoading(false);
+      if (!stale && peopleRequest.current === request) setLoading(false);
     });
     return () => {
       stale = true;
+      peopleRequest.current += 1;
     };
   }, [folderId, retry]);
 
@@ -568,15 +572,18 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
   }, []);
 
   const refresh = async (folderId: string) => {
+    const request = ++peopleRequest.current;
     try {
       const result = await api.folders.collaborators(folderId);
-      if (currentFolder.current === folderId) {
+      if (currentFolder.current === folderId && peopleRequest.current === request) {
         setPeople(result);
         setLoadError(null);
         setPreviewRevision((value) => value + 1);
       }
     } catch (error) {
-      if (currentFolder.current === folderId) setLoadError(apiErrorText(error, "Could not refresh folder access."));
+      if (currentFolder.current === folderId && peopleRequest.current === request) setLoadError(apiErrorText(error, "Could not refresh folder access."));
+    } finally {
+      if (currentFolder.current === folderId && peopleRequest.current === request) setLoading(false);
     }
   };
 
@@ -674,6 +681,7 @@ export function FolderShareDialog({ folder, onOpenChange, accessRequest, onReque
         setPeople((current) =>
           current ? { ...current, collaborators: current.collaborators.filter((item) => item.login !== person.login) } : current,
         );
+        await refresh(target.id);
       }
     } catch (error) {
       if (currentFolder.current === target.id) setActionError(apiErrorText(error, `Could not remove ${person.login}.`));
