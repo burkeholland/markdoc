@@ -1465,7 +1465,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 data-testid="search"
               />
               {filter !== "trash" && !query && (
-                <span className="pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" aria-hidden="true">
+                <span className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center text-ink-4 sm:flex" aria-hidden="true">
                   <Kbd>/</Kbd>
                 </span>
               )}

@@ -19,6 +19,18 @@ test.describe("dashboard search", () => {
     await searcher.context.close();
   });
 
+  test("centers the slash shortcut hint vertically in the search field", async () => {
+    const centerOffset = await searcher.page.getByTestId("search").evaluate((input) => {
+      const keycap = input.parentElement?.querySelector("kbd");
+      if (!keycap) throw new Error("The search shortcut hint was not rendered");
+      const inputRect = input.getBoundingClientRect();
+      const keycapRect = keycap.getBoundingClientRect();
+      return Math.abs(inputRect.top + inputRect.height / 2 - keycapRect.top - keycapRect.height / 2);
+    });
+
+    expect(centerOffset).toBeLessThanOrEqual(1);
+  });
+
   test("finds a document by body text and shows a highlighted snippet", async () => {
     const page = searcher.page;
     await expect(page.getByTestId("document-card")).toHaveCount(2);
