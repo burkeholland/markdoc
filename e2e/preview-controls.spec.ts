@@ -191,7 +191,7 @@ test.describe("preview controls: blocks", () => {
         await expect.poll(() => codeText(page), { message: `${step}: source` }).toBe(HEAD + control.source + TAIL);
         const block = page.locator(".md-rich > :nth-child(3)");
         await expect(block, step).toHaveJSProperty("tagName", control.tag.toUpperCase());
-        await expect(block, step).toHaveText(control.text ?? "Target paragraph.");
+        await expect(control.tag === "pre" ? block.locator(":scope > code") : block, step).toHaveText(control.text ?? "Target paragraph.");
         // (4) the block keeps the rhythm with the paragraph above and the one below.
         await expectRhythm(page, ":nth-child(2)", control.tag);
         await expectRhythm(page, control.tag, "p");
@@ -549,7 +549,7 @@ test.describe("preview controls: nested entries", () => {
     await clickEdgeOf(page, "ul li p", "end");
     await toolButton(page, "Code block").click();
     await expect.poll(() => codeText(page)).toBe("- ```\n  Item.\n  ```\n\nAfter.\n");
-    await expect(page.locator(".md-rich ul li pre")).toHaveText("Item.");
+    await expect(page.locator(".md-rich ul li pre > code")).toHaveText("Item.");
     await expect(toolButton(page, "Code block")).toHaveAttribute("aria-pressed", "true");
     await page.keyboard.type("\nmore");
     await expect.poll(() => codeText(page)).toBe("- ```\n  Item.\n  more\n  ```\n\nAfter.\n");
