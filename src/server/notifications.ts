@@ -9,6 +9,7 @@ import { resolveAnchor, newId } from "@/editor/collab/shared";
 import type { Suggestion } from "@/editor/collab/suggestions";
 import type { CollabClaims } from "@/server/collab/token";
 import { wakeDocument } from "@/server/agent-events";
+import { notificationLoginRefId } from "@/lib/notification-ref";
 
 export const SNIPPET_MAX = 120;
 
@@ -24,7 +25,7 @@ export interface NotifyInput {
   kind: NotificationKind;
   actorLogin?: string | null;
   actorName?: string | null;
-  /** Thread, reply or suggestion id; the document id for shares. */
+  /** Thread, reply or suggestion id, or a resource/login key for shares and access requests. */
   refId: string;
   snippet?: string;
   agentTargets?: string[];
@@ -398,17 +399,18 @@ export async function notifySuggestionDecision(docId: string, suggestion: Pick<S
 
 /** `share`: the person a document was just shared with. */
 export async function notifyShare(docId: string, login: string, role: string, actor: Actor): Promise<boolean> {
-  return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${login.toLowerCase()}`, snippet: role });
+  return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: notificationLoginRefId(docId, login), snippet: role });
 }
 
 async function notifyFolder(folderId: string, login: string, kind: "share" | "access.request", actor: { login?: string | null; name?: string | null }, snippet = ""): Promise<boolean> {
   const userLogin = login.trim().toLowerCase();
-  if (!userLogin || actor.login?.toLowerCase() === userLogin) return false;
+  const refLogin = kind === "share" ? userLogin : actor.login;
+  if (!userLogin || !refLogin || actor.login?.toLowerCase() === userLogin) return false;
   const db = await getDb();
   const rows = await db.insert(schema.folderNotifications).values({
     id: newId(), folderId, userLogin, kind,
     actorLogin: actor.login ?? null, actorName: actor.name ?? actor.login ?? null,
-    refId: `${folderId}:${kind === "share" ? userLogin : actor.login?.toLowerCase()}`, snippet: snippetOf(snippet),
+    refId: notificationLoginRefId(folderId, refLogin), snippet: snippetOf(snippet),
   }).onConflictDoNothing({ target: [schema.folderNotifications.userLogin, schema.folderNotifications.kind, schema.folderNotifications.refId] }).returning();
   return rows.length > 0;
 }
@@ -440,7 +442,7 @@ export async function notifyAccessRequest(docId: string, actor: { login?: string
     .where(and(eq(schema.documents.id, docId), isNull(schema.documents.deletedAt)))
     .limit(1);
   if (!row?.ownerLogin) return false;
-  return notify({ userLogin: row.ownerLogin, documentId: docId, kind: "access.request", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${actor.login.toLowerCase()}` });
+  return notify({ userLogin: row.ownerLogin, documentId: docId, kind: "access.request", actorLogin: actor.login, actorName: actor.name, refId: notificationLoginRefId(docId, actor.login) });
 }
 
 /** `suggestion.accepted`: the author of a comment or reply whose suggestion was applied, unless they did it themselves. */

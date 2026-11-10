@@ -80,7 +80,7 @@ describePostgres("legacy ownership transfer on PostgreSQL", () => {
       committed: false,
       verified: true,
       transferId: null,
-      schema: { userForeignKeys: 10, softUserReferences: 5, loginReferences: 4, rollbackTableReady: true },
+      schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
       selection: { sourceUsers: 1, sourceIsLegacy: true, sourceAccounts: 0, sourceSessions: 0, targetAccounts: 1, targetIsSource: false, sameLogin: false },
       documents: { sourceBefore: 2, targetBefore: 7, targetAfter: 9 },
       residualReferences: 0,
@@ -238,7 +238,10 @@ async function residualReferenceCount(database: Client): Promise<number> {
        (SELECT COUNT(*) FROM review WHERE user_id = $1) +
        (SELECT COUNT(*) FROM webhook WHERE user_id = $1) +
        (SELECT COUNT(*) FROM activity WHERE actor_id = $1 OR actor_id LIKE 'agent:' || $1 || ':%') +
-       (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2)
+       (SELECT COUNT(*) FROM notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2
+          OR (kind IN ('share', 'access.request') AND ref_id = document_id || ':' || $2)) +
+       (SELECT COUNT(*) FROM folder_notification WHERE lower(user_login) = $2 OR lower(actor_login) = $2
+          OR (kind IN ('share', 'access.request') AND ref_id = folder_id || ':' || $2))
      )::text AS count`,
     [SOURCE_ID, SOURCE_LOGIN],
   );
