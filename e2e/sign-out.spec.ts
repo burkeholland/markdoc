@@ -65,6 +65,10 @@ test.describe("privacy-safe sign out", () => {
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await page.waitForURL(/\/api\/auth\/signout/);
 
+    await expect(page.getByTestId("signout-card")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Are you sure you want to sign out?" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign out" })).toHaveClass(/btn-danger/);
+
     expect(await localDbNames(page)).toEqual([]);
     expect(await page.evaluate((key) => localStorage.getItem(key), registryKey)).toBeNull();
 
