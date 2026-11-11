@@ -346,8 +346,7 @@ test("readable folder account switch preserves the exact Share request for its o
   await expect(switchAccount).toBeVisible();
   await page.getByTestId("folder-page").screenshot({ path: testInfo.outputPath("folder-account-switch.png") });
   await switchAccount.click();
-  const login = `/login?next=${encodeURIComponent(path)}`;
-  await expect(page).toHaveURL((url) => url.pathname === "/api/auth/signout" && url.searchParams.get("callbackUrl") === login);
+  await expect(page).toHaveURL((url) => url.pathname === "/signout");
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await expect(page).toHaveURL((url) => url.pathname === "/login" && url.searchParams.get("next") === path);
   await waitForHydration(page);
@@ -428,7 +427,7 @@ for (const { linkAccess, signedIn } of [
         await confirmation.accept();
       });
       await switchAccount.click();
-      await expect(page).toHaveURL((url) => url.pathname === "/api/auth/signout" && url.searchParams.get("callbackUrl") === `/login?next=${encodeURIComponent(path)}`);
+      await expect(page).toHaveURL((url) => url.pathname === "/signout");
       expect(await localDbNames()).toEqual([]);
       expect(await page.evaluate(() => localStorage.getItem("markdoc:idb-docs"))).toBeNull();
       await page.getByRole("button", { name: "Sign out", exact: true }).click();

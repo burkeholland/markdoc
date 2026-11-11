@@ -63,14 +63,18 @@ test.describe("privacy-safe sign out", () => {
       await dialog.accept();
     });
     await page.getByRole("menuitem", { name: "Sign out" }).click();
-    await page.waitForURL(/\/api\/auth\/signout/);
+    await page.waitForURL(/\/signout/);
+
+    await expect(page.getByTestId("signout-card")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Are you sure you want to sign out?" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign out" })).toHaveClass(/btn-danger/);
 
     expect(await localDbNames(page)).toEqual([]);
     expect(await page.evaluate((key) => localStorage.getItem(key), registryKey)).toBeNull();
 
     await page.getByRole("button", { name: "Sign out" }).click();
-    await page.waitForURL((url) => !url.pathname.startsWith("/api/auth/signout"));
-    expect((await page.request.get("/api/me")).status()).toBe(401);
+    await page.waitForURL((url) => url.pathname === "/", { waitUntil: "load" });
+    expect(await page.evaluate(async () => (await fetch("/api/me")).status)).toBe(401);
 
     const bob = await signInWithin(context, `signout-bob-${Date.now()}`);
     try {

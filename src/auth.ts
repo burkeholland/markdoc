@@ -104,7 +104,7 @@ async function buildConfig(): Promise<NextAuthConfig> {
     trustHost: true,
     // A failed sign-in comes back to the sign-in page (`?error=`), which says what happened, instead of
     // Auth.js's own "server configuration" page.
-    pages: { signIn: "/login", error: "/login" },
+    pages: { signIn: "/login", signOut: "/signout", error: "/login" },
     logger: { error: logAuthError },
     callbacks: {
       async jwt({ token, user }) {
