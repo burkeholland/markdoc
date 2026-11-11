@@ -240,11 +240,6 @@ async function getRequest(docId: string, requestId: string): Promise<AgentReques
   return row;
 }
 
-/** The comment thread a request was made from (null for dialog requests); 404 when the request is unknown. */
-export async function requestThreadId(docId: string, requestId: string): Promise<string | null> {
-  return (await getRequest(docId, requestId)).threadId ?? null;
-}
-
 /** The shared comments map: thread id → thread Y.Map (same shape CommentsModel reads). */
 function commentsMap(doc: Y.Doc): Y.Map<Y.Map<unknown>> {
   return doc.getMap<Y.Map<unknown>>("comments");
@@ -456,13 +451,6 @@ export async function listRequestsForUser(user: Actor, opts: { status?: AgentReq
     .limit(limit);
   // Visibility guarantees an addressed row is addressed to the calling token, so its name is the token's.
   return rows.map((r) => toRequestItem(r.request, { documentTitle: r.documentTitle, userName: r.userName, userLogin: r.userLogin, agentName: r.request.agentLogin ? user.agent ?? null : null }));
-}
-
-/** Whether `userId` has ever sent a request (any status, addressed or not): the Settings checklist's "asked from the editor" step. */
-export async function userHasRequested(userId: string): Promise<boolean> {
-  const db = await getDb();
-  const rows = await db.select({ id: schema.agentRequests.id }).from(schema.agentRequests).where(eq(schema.agentRequests.userId, userId)).limit(1);
-  return rows.length > 0;
 }
 
 /** Claim an open request. Re-claiming by the same agent is a no-op; another agent's claim is a 409. */
