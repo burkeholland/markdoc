@@ -13,11 +13,11 @@ afterEach(() => {
 });
 
 describe("the preview menu", () => {
-  it("shows one top-level Wrap switch beside View, not another toggle inside the menu", async () => {
+  it("shows one top-level Wrap switch beside Font, not another toggle inside the menu", async () => {
     const user = userEvent.setup();
     render(<PreviewMenu />);
-    const trigger = screen.getByRole("button", { name: "Preview settings" });
-    expect(trigger.textContent).toBe("View");
+    const trigger = screen.getByRole("button", { name: "Preview font" });
+    expect(trigger.textContent).toBe("Font");
     const wrap = screen.getByRole("switch", { name: "Wrap code blocks" });
     expect(wrap).toHaveAttribute("aria-checked", "false");
     expect(wrap).toHaveTextContent("Wrap code");
@@ -34,7 +34,7 @@ describe("the preview menu", () => {
   it("shows each font in its own face without extra descriptive text", async () => {
     const user = userEvent.setup();
     render(<PreviewMenu />);
-    await user.click(screen.getByRole("button", { name: "Preview settings" }));
+    await user.click(screen.getByRole("button", { name: "Preview font" }));
     expect(screen.getAllByRole("menuitemradio")).toHaveLength(4);
     const serif = screen.getByTestId("preview-font-source-serif");
     expect(serif.textContent).toBe("Source Serif 4");
@@ -44,7 +44,7 @@ describe("the preview menu", () => {
   it("works from the keyboard and stores the choice", async () => {
     const user = userEvent.setup();
     render(<PreviewMenu />);
-    screen.getByRole("button", { name: "Preview settings" }).focus();
+    screen.getByRole("button", { name: "Preview font" }).focus();
     await user.keyboard("{Enter}");
     await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
     expect(localStorage.getItem(PREVIEW_FONT_STORAGE_KEY)).toBe("source-serif");

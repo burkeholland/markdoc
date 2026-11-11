@@ -25,8 +25,8 @@ export function PreviewMenu() {
       </button>
       <Menu>
         <MenuTrigger asChild>
-          <button type="button" className="preview-menu-trigger" aria-label="Preview settings" data-testid="preview-menu-trigger">
-            View
+          <button type="button" className="preview-menu-trigger" aria-label="Preview font" data-testid="preview-menu-trigger">
+            Font
             <ChevronDown size={13} aria-hidden />
           </button>
         </MenuTrigger>

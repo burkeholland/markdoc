@@ -125,7 +125,7 @@ for (const width of [1440, 360, 393]) {
       .analyze();
     expect(accessibility.violations).toEqual([]);
 
-    const trigger = page.getByRole("button", { name: "Preview settings" });
+    const trigger = page.getByRole("button", { name: "Preview font" });
     await setting.focus();
     await expect(setting).toHaveAttribute("aria-checked", "true");
     await page.keyboard.press("Space");

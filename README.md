@@ -17,7 +17,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 ### Writing
 
 - Two-pane live editor: CodeMirror source and a ProseMirror rich pane side by side; type in either, the other follows instantly.
-- The preview's **Wrap code** switch beside **View** wraps long lines (including URLs) in every block. The switch stays above the scrolling preview. Blocks start unwrapped; the choice is remembered in this browser without changing Markdown, copied text, exports, or other collaborators' views.
+- The preview's **Wrap code** switch beside **Font** wraps long lines (including URLs) in every block. The switch stays above the scrolling preview. Blocks start unwrapped; the choice is remembered in this browser without changing Markdown, copied text, exports, or other collaborators' views.
 - Markdown-aware typing in the code pane: a third `` ` `` opens a fenced block, backticks never auto-pair, `*` `_` `` ` `` `[` wrap the selection, Tab / Shift-Tab nest and outdent list items.
 - GitHub Flavored Markdown (tables, task lists, footnotes, front matter, raw HTML kept) with a linter in the status bar and jump-to-line.
 - Slash menu: type `/` in the rich pane for headings, lists, tables, code blocks with a language, images, links, comments, today's date.
