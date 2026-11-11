@@ -45,16 +45,24 @@ function storage(): Storage | null {
 }
 
 export function readThemePreference(): ThemePreference {
-  const value = storage()?.getItem(THEME_STORAGE_KEY);
-  return isThemePreference(value) ? value : "system";
+  try {
+    const value = storage()?.getItem(THEME_STORAGE_KEY);
+    return isThemePreference(value) ? value : "system";
+  } catch {
+    return "system";
+  }
 }
 
 export function systemPrefersDark(): boolean {
-  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(DARK_QUERY).matches;
+  try {
+    return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(DARK_QUERY).matches === true;
+  } catch {
+    return false;
+  }
 }
 
 export function applyTheme(preference: ThemePreference): ResolvedTheme {
-  const resolved = resolveTheme(preference, systemPrefersDark());
+  const resolved = preference === "system" ? resolveTheme(preference, systemPrefersDark()) : preference;
   if (typeof document !== "undefined") document.documentElement.setAttribute("data-theme", resolved);
   return resolved;
 }

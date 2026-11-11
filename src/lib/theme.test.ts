@@ -80,6 +80,21 @@ describe("theme", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
+  it("recovers from throwing storage and matchMedia, and skips media for explicit themes", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    const throwing = vi.fn(() => {
+      throw new Error("no media");
+    });
+    Object.defineProperty(window, "matchMedia", { value: throwing, configurable: true, writable: true });
+    expect(readThemePreference()).toBe("system");
+    expect(applyTheme(readThemePreference())).toBe("light");
+    throwing.mockClear();
+    expect(applyTheme("dark")).toBe("dark");
+    expect(throwing).not.toHaveBeenCalled();
+  });
+
   it("notifies subscribers when the preference changes", () => {
     const fn = vi.fn();
     const unsubscribe = themeStore.subscribe(fn);
