@@ -26,8 +26,8 @@ test("missing documents render without React errors and keep the saved theme", a
     expect(response?.status()).toBe(404);
     await expect(page.getByRole("heading", { name: "You can't open this document" })).toBeVisible();
     await waitForHydration(page);
+    expect(errors).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     expect(await page.evaluate(() => localStorage.getItem("markdoc:brand"))).toBeNull();
-    expect(errors).toEqual([]);
   }
 });

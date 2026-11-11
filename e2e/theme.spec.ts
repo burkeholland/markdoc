@@ -85,8 +85,12 @@ test.describe("dark mode", () => {
     const context = await browser.newContext({ colorScheme: "light" });
     await context.addInitScript(() => localStorage.setItem("markdoc:theme", "dark"));
     const page = await context.newPage();
+    await page.route("**/_next/static/chunks/**", (route) =>
+      route.request().resourceType() === "script" ? route.abort() : route.continue(),
+    );
     await page.goto("/login", { waitUntil: "domcontentloaded" });
-    // Read synchronously at domcontentloaded: React has not hydrated yet.
+    // With Next's JavaScript blocked, only the parser-blocking boot script can set the theme.
+    await expect(page.locator("html")).not.toHaveAttribute("data-hydrated");
     expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
     expect(isDark(await bg(page, "body"))).toBe(true);
     await context.close();
