@@ -101,7 +101,7 @@ it("ArrowDown on the account trigger opens the menu on its first item, ArrowUp o
   const trigger = screen.getByRole("button", { name: "Account" });
   trigger.focus();
   await user.keyboard("{ArrowDown}");
-  await waitFor(() => expect(screen.getByRole("menuitem", { name: /Agents/ })).toHaveFocus());
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: "Settings" })).toHaveFocus());
   await user.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   trigger.focus();

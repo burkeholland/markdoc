@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
-import { cn } from "@/lib/utils";
+// `clsx` directly, not `cn` from `@/lib/utils`: that module's other helpers (grapheme tables, formatters)
+// would ride into the document page's first-paint scripts (e2e/first-paint.spec.ts).
+import { clsx as cn } from "clsx";
 import {
   CODE_COLUMN_BOX,
   CODE_COLUMN_SPLIT,

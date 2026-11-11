@@ -1897,7 +1897,9 @@ body {
   padding-left: 1.6em;
   position: relative;
 }
-.reader-body li.task-list-item > input[type="checkbox"] {
+/* In a loose list (blank lines between items) GFM puts the checkbox inside the item's first <p>. */
+.reader-body li.task-list-item > input[type="checkbox"],
+.reader-body li.task-list-item > p:first-child > input[type="checkbox"] {
   position: absolute;
   left: 0;
   top: 0.4em;
@@ -1906,7 +1908,7 @@ body {
   height: 1em;
   accent-color: var(--color-accent);
 }
-.reader-body li.task-list-item:has(> input:checked) {
+.reader-body li.task-list-item:has(> input:checked, > p:first-child > input:checked) {
   color: var(--color-ink-3);
 }
 .reader-body blockquote {
@@ -2073,7 +2075,8 @@ body {
   margin-left: 0;
   padding-left: 0.25em;
 }
-.rich-placeholder.reader-body li.task-list-item > input[type="checkbox"] {
+.rich-placeholder.reader-body li.task-list-item > input[type="checkbox"],
+.rich-placeholder.reader-body li.task-list-item > p:first-child > input[type="checkbox"] {
   left: -1.55em;
   top: 0.3em;
   width: 1.05em;
