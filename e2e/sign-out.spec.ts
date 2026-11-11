@@ -74,7 +74,7 @@ test.describe("privacy-safe sign out", () => {
 
     await page.getByRole("button", { name: "Sign out" }).click();
     await page.waitForURL((url) => !url.pathname.startsWith("/api/auth/signout"));
-    expect((await page.request.get("/api/me")).status()).toBe(401);
+    expect(await page.evaluate(async () => (await fetch("/api/me")).status)).toBe(401);
 
     const bob = await signInWithin(context, `signout-bob-${Date.now()}`);
     try {
