@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 let pathname = "/d/missing";
@@ -29,12 +29,12 @@ describe.each(["document", "folder"] as const)("%s unavailable Share target", (r
     expect(screen.getByTestId("no-access-status")).toHaveTextContent(`If this ${resource} exists`);
   });
 
-  it("keeps the exact Share request when switching to the authorized account", () => {
+  it("keeps the exact Share request when switching to the authorized account", async () => {
     pathname = `/${resource === "document" ? "d" : "f"}/target`;
     const next = `${pathname}?accessRequest=carol&notification=request-id`;
     window.history.replaceState(null, "", next);
     render(<NoAccess resource={resource} />);
     fireEvent.click(screen.getByTestId("no-access-switch"));
-    expect(signOut).toHaveBeenCalledExactlyOnceWith(`/login?next=${encodeURIComponent(next)}`);
+    await waitFor(() => expect(signOut).toHaveBeenCalledExactlyOnceWith(`/login?next=${encodeURIComponent(next)}`));
   });
 });

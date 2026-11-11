@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { usePathname } from "next/navigation";
-import { signOutSafely } from "@/lib/sign-out";
 import { shareReturnPath } from "@/lib/share-target";
 
 type Status = "idle" | "sending" | "sent" | "error";
@@ -28,7 +27,9 @@ export function NoAccess({ resource = "document" }: { resource?: "document" | "f
 
   const switchAccount = () => {
     const next = shareReturnPath(pathname, Object.fromEntries(new URL(window.location.href).searchParams));
-    void signOutSafely(`/login?next=${encodeURIComponent(next)}`);
+    // Loaded on the click: this screen is the document route's not-found boundary, so a static import puts
+    // the sign-out flow's offline store (y-indexeddb, Yjs: ≈ 119 kB) in every document page's first paint.
+    void import("@/lib/sign-out").then((m) => m.signOutSafely(`/login?next=${encodeURIComponent(next)}`));
   };
 
   return (

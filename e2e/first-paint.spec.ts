@@ -13,9 +13,15 @@ import { signIn, createDocument, waitForEditor, type User } from "./helpers";
  * change (the spike: 8 / 470 351 B on its base), none of them the editor's. Dev serves one chunk per module
  * and lists the `dynamic()` target's chunk (`src_components_editor_editor-shell_tsx_….js`) among the page's
  * scripts, so neither the count nor the "no editor chunk" check means anything there.
+ *
+ * The count went from 9 to 10 with the route's "No access" screen (`not-found.tsx`, #2411): Next ships a
+ * route's not-found boundary with the page, and that screen is one client chunk of ≈ 2.5 kB. Measured
+ * 10 / 475 527 B then, with the byte budget unchanged. That screen must not import anything heavy
+ * statically: its sign-out flow once brought y-indexeddb and Yjs along (11 / 598 601 B), unseen by the
+ * chunk-name check below because production names are hashes.
  */
 
-const MAX_SCRIPTS = 9;
+const MAX_SCRIPTS = 10;
 const MAX_BYTES = 480_000;
 const prod = process.env.PROD_BASE_URL?.replace(/\/$/, "");
 

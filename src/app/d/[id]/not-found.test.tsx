@@ -48,9 +48,9 @@ describe("/d/[id] not-found (no access)", () => {
     await waitFor(() => expect(screen.getByTestId("no-access-status").textContent).toContain("Could not send"));
   });
 
-  it("switch account signs out and returns to this document after login", () => {
+  it("switch account signs out and returns to this document after login", async () => {
     render(<DocumentNotFound />);
     fireEvent.click(screen.getByTestId("no-access-switch"));
-    expect(signOutSafely).toHaveBeenCalledWith("/login?next=%2Fd%2Fabc123");
+    await waitFor(() => expect(signOutSafely).toHaveBeenCalledWith("/login?next=%2Fd%2Fabc123"));
   });
 });
