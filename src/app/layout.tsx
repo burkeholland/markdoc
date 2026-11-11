@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono, Fraunces, Instrument_Sans, Source_Serif_4, IBM_Plex_Mono } from "next/font/google";
-import { THEME_BOOT_SCRIPT } from "@/lib/theme";
+import { ThemeBootstrap } from "@/components/theme-bootstrap";
 import { publicOrigin } from "@/server/public-origin";
 import { HydrationMarker } from "@/components/hydration-marker";
 import "./globals.css";
@@ -13,9 +13,6 @@ const fraunces = Fraunces({ variable: "--font-fraunces", subsets: ["latin"], dis
 const instrumentSans = Instrument_Sans({ variable: "--font-instrument-sans", subsets: ["latin"], display: "swap" });
 const sourceSerif = Source_Serif_4({ variable: "--font-source-serif", subsets: ["latin"], display: "swap" });
 const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500", "600"], display: "swap" });
-
-// The phase-1 look switch (`?brand=a|b`, task #398) is gone; a stored choice from then is dropped so it never lingers.
-const BRAND_CLEANUP_SCRIPT = `(function(){try{localStorage.removeItem("markdoc:brand");}catch(e){}})();`;
 
 export const metadata: Metadata = {
   // Relative image URLs below resolve against this; without it Next falls back to http://localhost:3000
@@ -51,10 +48,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     // data-theme is set by the boot script before React runs, so the server markup never matches it.
     <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} ${instrumentSans.variable} ${sourceSerif.variable} ${plexMono.variable} h-full antialiased`} suppressHydrationWarning>
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
-      </head>
       <body className="min-h-full flex flex-col bg-surface text-ink">
+        <ThemeBootstrap />
         {children}
         <HydrationMarker />
       </body>

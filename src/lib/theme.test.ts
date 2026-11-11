@@ -320,4 +320,21 @@ describe("theme", () => {
       expect(setAttribute).toHaveBeenCalledExactlyOnceWith("data-theme", "dark");
     });
   });
+
+  describe("recovery resilience", () => {
+    afterEach(() => { vi.restoreAllMocks(); restoreMatchMedia(); });
+
+    it("falls back to system/light when storage and matchMedia throw", () => {
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
+      Object.defineProperty(window, "matchMedia", { value: () => { throw new Error("nope"); }, configurable: true, writable: true });
+      expect(readThemePreference()).toBe("system");
+      expect(applyTheme("system")).toBe("light");
+    });
+
+    it("does not query matchMedia for explicit preferences", () => {
+      setMatchMedia(true);
+      expect(applyTheme("light")).toBe("light");
+      expect(window.matchMedia).not.toHaveBeenCalled();
+    });
+  });
 });
