@@ -3340,7 +3340,7 @@ export function EditorShell({
 
   return (
     <TooltipProvider>
-      <div className={SHELL_BOX} data-testid="editor-shell" data-breakpoint={breakpoint}>
+      <div className={cn(SHELL_BOX, "editor-shell")} data-testid="editor-shell" data-breakpoint={breakpoint} data-preview-font={previewFont}>
         <a
           href="#editor-main"
           className="skip-link"
