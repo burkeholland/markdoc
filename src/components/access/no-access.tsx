@@ -13,9 +13,11 @@ export function NoAccess({ resource = "document" }: { resource?: "document" | "f
   const pathname = usePathname() ?? "";
   const id = (resource === "folder" ? /^\/f\/([^/]+)/ : /^\/d\/([^/]+)/).exec(pathname)?.[1] ?? null;
   const [status, setStatus] = useState<Status>("idle");
+  const [switchFailed, setSwitchFailed] = useState(false);
 
   const requestAccess = async () => {
     if (!id || status === "sending" || status === "sent") return;
+    setSwitchFailed(false);
     setStatus("sending");
     try {
       const res = await fetch(`/api/${resource === "folder" ? "folders" : "documents"}/${id}/access-request`, { method: "POST" });
@@ -29,7 +31,14 @@ export function NoAccess({ resource = "document" }: { resource?: "document" | "f
     const next = shareReturnPath(pathname, Object.fromEntries(new URL(window.location.href).searchParams));
     // Loaded on the click: this screen is the document route's not-found boundary, so a static import puts
     // the sign-out flow's offline store (y-indexeddb, Yjs: ≈ 119 kB) in every document page's first paint.
-    void import("@/lib/sign-out").then((m) => m.signOutSafely(`/login?next=${encodeURIComponent(next)}`));
+    // Only a failed load lands in the second handler (offline, or a deploy replaced the chunk): nothing was
+    // signed out or removed. `signOutSafely` reports its own failures, and there is no other sign-out path
+    // here, because any other would skip its removal of the offline copies.
+    setSwitchFailed(false);
+    void import("@/lib/sign-out").then(
+      (m) => m.signOutSafely(`/login?next=${encodeURIComponent(next)}`),
+      () => setSwitchFailed(true),
+    );
   };
 
   return (
@@ -50,8 +59,9 @@ export function NoAccess({ resource = "document" }: { resource?: "document" | "f
         </button>
       </div>
       <p className="mt-3 min-h-5 text-sm text-ink-3" role="status" data-testid="no-access-status">
-        {status === "sent" && `If this ${resource} exists, its owner has been notified.`}
-        {status === "error" && "Could not send the request. Try again."}
+        {switchFailed && "Could not switch accounts. You are still signed in. Try again."}
+        {!switchFailed && status === "sent" && `If this ${resource} exists, its owner has been notified.`}
+        {!switchFailed && status === "error" && "Could not send the request. Try again."}
       </p>
       {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- keeps next/link out of the shared chunk (#1485) */}
       <a href="/" className="mt-4 text-sm font-medium text-accent hover:underline" data-testid="no-access-documents">

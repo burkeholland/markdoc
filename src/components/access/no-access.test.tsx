@@ -38,3 +38,26 @@ describe.each(["document", "folder"] as const)("%s unavailable Share target", (r
     await waitFor(() => expect(signOut).toHaveBeenCalledExactlyOnceWith(`/login?next=${encodeURIComponent(next)}`));
   });
 });
+
+it("says the person is still signed in when the sign-out code cannot be loaded, and signs nobody out", async () => {
+  pathname = "/d/target";
+  vi.resetModules();
+  vi.doMock("@/lib/sign-out", () => {
+    throw new Error("chunk failed to load");
+  });
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  try {
+    render(<NoAccess />);
+    fireEvent.click(screen.getByTestId("no-access-switch"));
+    expect(await screen.findByText("Could not switch accounts. You are still signed in. Try again.")).toBeVisible();
+    expect(screen.getByTestId("no-access-status")).toHaveAttribute("role", "status");
+    expect(signOut).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).not.toHaveBeenCalled();
+  } finally {
+    process.off("unhandledRejection", unhandled);
+    vi.doUnmock("@/lib/sign-out");
+    vi.resetModules();
+  }
+});
