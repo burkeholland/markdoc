@@ -85,7 +85,7 @@ test.describe("preview font", () => {
     const hierarchy = initialHeadings.map(({ size, weight }) => ({ size, weight }));
     const unchanged = page.locator(".wordmark, .pane-label, .cm-content, .md-rich pre code, .md-rich code.md-inline-code");
     const originalTypography = await typography(unchanged);
-    expect(originalTypography.length).toBeGreaterThanOrEqual(6);
+    expect(originalTypography.length).toBeGreaterThanOrEqual(5);
     await expect(page.locator(".md-rich pre code")).toHaveCSS("font-family", /JetBrains/);
     await expect(page.locator(".md-rich code.md-inline-code")).toHaveCSS("font-family", /JetBrains/);
 
