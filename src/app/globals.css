@@ -455,6 +455,10 @@ body {
   padding: 0 24px 0 8px;
   caret-color: var(--color-accent);
 }
+/* "Start writing Markdown…" says the document is empty, which is not known until its text is in. */
+[data-content-pending] .cm-placeholder {
+  visibility: hidden;
+}
 .cm-editor .cm-line {
   padding: 0 2px;
 }
@@ -2036,6 +2040,20 @@ body {
 }
 .rich-placeholder.reader-body pre {
   font-size: 0.9em;
+}
+/* The editor's code block starts with its controls row (`.md-code-controls`: the language box).
+   The preview has no controls, so it keeps the same room free; without it every code block, and all
+   the text after it, moved down 30 px when the editor took over. */
+.rich-placeholder.reader-body pre::before {
+  content: "";
+  display: block;
+  height: 32px;
+  margin: -8px 0 6px;
+}
+@media (pointer: coarse) {
+  .rich-placeholder.reader-body pre::before {
+    height: 44px;
+  }
 }
 .rich-placeholder.reader-body li {
   margin: 0.3em 0;

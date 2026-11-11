@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, type User } from "./helpers";
+import { signIn, createDocument, waitForEditor, type User } from "./helpers";
 
 /**
  * First-paint budget of the editor page (task #1545, spike #1505). `/d/<id>` ships the preview and a
@@ -74,6 +74,30 @@ test.describe("editor page first paint", () => {
       for (const { src, bytes } of sizes) console.log(`[defer]   ${bytes.toString().padStart(8)}  ${src}`);
       expect(srcs.length).toBeLessThanOrEqual(MAX_SCRIPTS);
       expect(total).toBeLessThanOrEqual(MAX_BYTES);
+    });
+
+    // The dashboard fetches the editor's code once it is idle (`warm-editor.ts`), so the click on a document
+    // goes straight to the shell. Before that the click fetched 15 scripts (the shell, then the code pane in a
+    // second round) and the page showed empty chrome, the shell and the code pane one after the other.
+    test("opening a document from the dashboard fetches no editor code after the click", async () => {
+      const { page } = user;
+      const id = await createDocument(page, "# Warm\n\nA paragraph.\n", "Warm");
+      await page.goto("/");
+      await page.locator("html[data-editor-warm]").waitFor({ state: "attached", timeout: 30_000 });
+      const scripts: { url: string; bytes: number }[] = [];
+      page.on("response", async (response) => {
+        if (response.request().resourceType() !== "script") return;
+        scripts.push({ url: response.url(), bytes: (await response.body().catch(() => Buffer.alloc(0))).length });
+      });
+      await page.locator(`a[data-testid="document-card"][href="/d/${id}"]`).click();
+      await waitForEditor(page);
+      await expect(page.locator(".cm-content")).toContainText("A paragraph.");
+      // The placeholder is skipped: the shell's module was in memory when the page rendered.
+      await expect(page.getByTestId("editor-loading")).toHaveCount(0);
+      console.log(`[warm] scripts after the click: ${scripts.length} / ${scripts.reduce((a, s) => a + s.bytes, 0).toLocaleString("en-US")} B`);
+      // What may still load is the document page's own entry (two chunks, ≈ 30 kB); the editor stack is ≈ 1.5 MB.
+      expect(scripts.length).toBeLessThanOrEqual(3);
+      expect(scripts.reduce((a, s) => a + s.bytes, 0)).toBeLessThanOrEqual(100_000);
     });
   });
 });

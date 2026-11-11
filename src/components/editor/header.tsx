@@ -410,10 +410,13 @@ export function HeaderStar({ docId, ready }: { docId: string; ready: boolean }) 
     if (ready) start({ action: "load", confirmed: null, retry: false });
   }, [ready, start]);
 
-  if (!ready) return null;
+  // An empty box of the button's size until the answer is in: the save status beside it used to jump
+  // 48 px to the right when the star arrived a moment after the header.
+  const slot = <span className="h-8 w-8 shrink-0 max-md:hidden" aria-hidden="true" data-testid="header-star-slot" />;
+  if (!ready) return slot;
   const current = state.docId === docId ? state : emptyHeaderStarState(docId);
   if (current.starred === null) {
-    if (current.error?.action !== "load") return null;
+    if (current.error?.action !== "load") return slot;
     const retrying = current.pending === "load";
     return (
       <>

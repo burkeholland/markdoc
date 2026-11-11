@@ -313,6 +313,52 @@ test.describe("axe: pages", () => {
     await context.close();
   });
 
+  // From the click on a card until the document page arrives, the editor's empty chrome covers the dashboard
+  // (`opening-document.tsx`). The covered dashboard must be out of reach of the keyboard, and the wait announced.
+  test("opening a document: the covered dashboard is out of the keyboard's reach and the wait is announced", async ({ browser }) => {
+    const { page, context } = await signIn(browser, uniqueLogin("a11y-opening"));
+    const id = await createDocument(page, "# Opening\n\nA paragraph.\n", "Opening");
+    await page.goto("/");
+    await waitForHydration(page);
+    // The status line is in the page, empty, before anything is opened: its text changing is what gets announced.
+    const status = page.getByTestId("opening-status");
+    await expect(status).toBeAttached();
+    await expect(status).toBeEmpty();
+
+    // Hold the document page back so the cover stays up.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route(new RegExp(`/d/${id}(\\?|$)`), async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.locator(`a[data-testid="document-card"][href="/d/${id}"]`).focus();
+    await page.keyboard.press("Enter");
+    const cover = page.getByTestId("opening-document");
+    await expect(cover).toBeVisible();
+    await expect(cover).toBeFocused();
+    await expect(page.getByTestId("opening-covered")).toHaveAttribute("inert", "");
+    await expect(status).toHaveText("Opening the document…");
+    expect(await status.evaluate((el) => el.closest("[inert]") === null), "the status line is outside the inert dashboard").toBe(true);
+    await scan(page, "dashboard covered while a document opens");
+
+    // Tab never lands on a covered control, in either direction.
+    for (const key of ["Tab", "Tab", "Tab", "Shift+Tab", "Shift+Tab"]) {
+      await page.keyboard.press(key);
+      await expect(cover, `focus after ${key}`).toBeFocused();
+    }
+    // Enter, Space, the search shortcut and the command palette shortcut reach nothing under the cover.
+    for (const key of ["Enter", "Space", "/", "ControlOrMeta+k"]) await page.keyboard.press(key);
+    await expect(cover).toBeFocused();
+    await expect(page.locator('[role="dialog"], [role="menu"]')).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe("/");
+
+    release();
+    await waitForEditor(page);
+    await expect(cover).toHaveCount(0);
+    await context.close();
+  });
+
   test("onboarding: dashboard empty state with the guided-doc action, editor hint bar", async ({ browser }) => {
     const { page, context } = await signIn(browser, uniqueLogin("a11y-onboard"));
     await expect(page.getByTestId("empty-state")).toBeVisible();
