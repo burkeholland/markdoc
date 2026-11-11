@@ -63,7 +63,7 @@ test.describe("privacy-safe sign out", () => {
       await dialog.accept();
     });
     await page.getByRole("menuitem", { name: "Sign out" }).click();
-    await page.waitForURL(/\/api\/auth\/signout/);
+    await page.waitForURL(/\/signout/);
 
     await expect(page.getByTestId("signout-card")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Are you sure you want to sign out?" })).toBeVisible();
