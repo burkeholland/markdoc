@@ -250,10 +250,10 @@
   background: var(--p-paper);
 }
 /* Preview display preferences; code stays mono regardless of the prose font. */
-.rich-column[data-preview-font="instrument-sans"] { --preview-font: var(--font-instrument-sans), var(--font-sans); }
-.rich-column[data-preview-font="inter"] { --preview-font: var(--font-inter), ui-sans-serif, system-ui, sans-serif; }
-.rich-column[data-preview-font="source-serif"] { --preview-font: var(--font-source-serif), Georgia, "Times New Roman", serif; }
-.rich-column[data-preview-font="plex-mono"] { --preview-font: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
+.editor-shell[data-preview-font="instrument-sans"] { --preview-font: var(--font-instrument-sans), var(--font-sans); }
+.editor-shell[data-preview-font="inter"] { --preview-font: var(--font-inter), ui-sans-serif, system-ui, sans-serif; }
+.editor-shell[data-preview-font="source-serif"] { --preview-font: var(--font-source-serif), Georgia, "Times New Roman", serif; }
+.editor-shell[data-preview-font="plex-mono"] { --preview-font: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rich-column .md-rich,
 .rich-column .rich-placeholder {
   font-family: var(--preview-font, var(--font-instrument-sans), var(--font-sans));
@@ -2072,10 +2072,9 @@ body {
 }
 
 /* ---------- Display type ----------
-   Fraunces (--p-font-display) only where it belongs: the document title, the landing hero, and h1–h3
-   in the reader and (hand-mirrored in src/server/export/html.ts) the HTML export. Preview headings
-   keep this weight and spacing but override the family and variations in the scoped font rules above.
-   Same specificity as the heading rules above, so this block must stay below them. */
+   Fraunces (--p-font-display) styles document titles outside the editor, the landing hero, and h1–h3
+   in the reader and (hand-mirrored in src/server/export/html.ts) the HTML export. Editor titles and
+   preview headings follow the selected preview font while keeping their weight and spacing. */
 .doc-title,
 .hero-title,
 .md-rich h1,
@@ -2088,6 +2087,11 @@ body {
   font-weight: 600;
   letter-spacing: -0.005em;
   font-variation-settings: "opsz" 36, "SOFT" 30;
+}
+
+.editor-shell .doc-title {
+  font-family: var(--preview-font, var(--p-font-display));
+  font-variation-settings: normal;
 }
 
 /* The article is the printed page; chrome, TOC and pills are screen-only. */

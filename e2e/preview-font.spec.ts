@@ -42,6 +42,8 @@ async function typography(elements: Locator) {
 
 async function expectPreviewFont(page: Page, family: string) {
   await expect(page.locator(".md-rich > p")).toHaveCSS("font-family", family);
+  await expect(page.locator(".doc-title")).toHaveCSS("font-family", family);
+  await expect(page.locator(".doc-title")).toHaveCSS("font-variation-settings", "normal");
   const allHeadings = page.locator(".md-rich :is(h1, h2, h3, h4, h5, h6)");
   await expect(allHeadings).toHaveCount(7);
   for (const heading of await allHeadings.all()) {
@@ -81,9 +83,9 @@ test.describe("preview font", () => {
     expect(initialHeadings.map((style) => Number.parseFloat(style.size))).toEqual([32, 24, 20, 16.8, 16, 16]);
     expect(initialHeadings.map((style) => style.weight)).toEqual(["600", "600", "600", "700", "700", "700"]);
     const hierarchy = initialHeadings.map(({ size, weight }) => ({ size, weight }));
-    const unchanged = page.locator(".wordmark, .doc-title, .pane-label, .cm-content, .md-rich pre code, .md-rich code.md-inline-code");
+    const unchanged = page.locator(".wordmark, .pane-label, .cm-content, .md-rich pre code, .md-rich code.md-inline-code");
     const originalTypography = await typography(unchanged);
-    expect(originalTypography.length).toBeGreaterThanOrEqual(6);
+    expect(originalTypography.length).toBeGreaterThanOrEqual(5);
     await expect(page.locator(".md-rich pre code")).toHaveCSS("font-family", /JetBrains/);
     await expect(page.locator(".md-rich code.md-inline-code")).toHaveCSS("font-family", /JetBrains/);
 
