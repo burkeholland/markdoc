@@ -285,6 +285,49 @@
 .preview-menu-trigger[data-state="open"] {
   background: var(--color-surface-3);
 }
+.preview-wrap-toggle {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px;
+  border-radius: var(--p-radius-control);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-ink-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.preview-wrap-track {
+  position: relative;
+  width: 30px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--color-line-2);
+}
+.preview-wrap-track::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 15%);
+}
+.preview-wrap-toggle[aria-checked="true"] .preview-wrap-track {
+  background: var(--color-accent);
+}
+.preview-wrap-toggle[aria-checked="true"] .preview-wrap-track::after {
+  transform: translateX(12px);
+}
+@media (pointer: coarse) {
+  .preview-wrap-toggle {
+    min-height: 44px;
+  }
+}
 .wordmark {
   font-family: var(--p-font-display);
   font-weight: 500;

@@ -26,10 +26,7 @@ async function openPreview(page: Page, id: string) {
 }
 
 async function toggleWrap(page: Page, phone = false) {
-  const trigger = page.getByRole("button", { name: "Preview settings" });
-  if (phone) await trigger.tap();
-  else await trigger.click();
-  const setting = page.getByRole("menuitemcheckbox", { name: "Wrap code blocks" });
+  const setting = page.getByRole("switch", { name: "Wrap code blocks" });
   if (phone) await setting.tap();
   else await setting.click();
 }
@@ -56,7 +53,7 @@ async function state(page: Page) {
 }
 
 for (const width of [1440, 360, 393]) {
-  test(`preview menu wraps all blocks and stays reachable at ${width}px`, async ({ browser }, testInfo) => {
+  test(`top-level Wrap switch wraps all blocks and stays reachable at ${width}px`, async ({ browser }, testInfo) => {
     const phone = width < 600;
     const context = await browser.newContext({
       ...(phone ? devices["iPhone 13"] : {}),
@@ -72,6 +69,12 @@ for (const width of [1440, 360, 393]) {
     const first = blocks.nth(0);
     const firstCode = first.locator(":scope > code");
     const language = first.getByRole("textbox", { name: "Code block language" });
+    const setting = page.getByRole("switch", { name: "Wrap code blocks" });
+    await expect(setting).toHaveCount(1);
+    await expect(setting).toHaveAttribute("aria-checked", "false");
+    if (phone) {
+      expect((await setting.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
     await expect(column).toHaveAttribute("data-wrap-code", "false");
     await expect(first).toHaveAttribute("data-language", "markdown");
     await expect(page.locator(".md-rich ol li pre")).toHaveCount(1);
@@ -123,17 +126,15 @@ for (const width of [1440, 360, 393]) {
     expect(accessibility.violations).toEqual([]);
 
     const trigger = page.getByRole("button", { name: "Preview settings" });
-    await trigger.focus();
-    await page.keyboard.press("Enter");
-    const setting = page.getByRole("menuitemcheckbox", { name: "Wrap code blocks" });
+    await setting.focus();
     await expect(setting).toHaveAttribute("aria-checked", "true");
-    await expect(setting).toBeFocused();
     await page.keyboard.press("Space");
     await expect(column).toHaveAttribute("data-wrap-code", "false");
-    await expect(trigger).toBeFocused();
+    await expect(setting).toHaveAttribute("aria-checked", "false");
+    await expect(setting).toBeFocused();
+    await expect(page.getByTestId("preview-menu")).toHaveCount(0);
     expect((await metrics(firstCode)).height).toBe(before.height);
     expect((await metrics(firstCode)).scrollWidth).toBeGreaterThan(before.width);
-    await page.keyboard.press("Enter");
     await page.keyboard.press("Enter");
     await expect(column).toHaveAttribute("data-wrap-code", "true");
 
@@ -188,15 +189,28 @@ for (const width of [1440, 360, 393]) {
     const scroll = column.locator(":scope > .scrollbar-thin");
     const toolbar = page.getByTestId("preview-toolbar");
     const toolbarBox = (await toolbar.boundingBox())!;
+    const switchBox = (await setting.boundingBox())!;
     for (const fraction of [0, 0.5, 1]) {
       await scroll.evaluate((element, fraction) => { element.scrollTop = fraction * (element.scrollHeight - element.clientHeight); }, fraction);
       expect((await toolbar.boundingBox())!.y).toBe(toolbarBox.y);
-      expect(await trigger.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-      })).toBe(true);
-      await trigger.click();
+      for (const control of [setting, trigger]) {
+        expect(await control.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+        })).toBe(true);
+        const box = (await control.boundingBox())!;
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
+      }
+      expect((await setting.boundingBox())!.y).toBe(switchBox.y);
+      await toggleWrap(page, phone);
+      await expect(setting).toHaveAttribute("aria-checked", "false");
+      await expect(column).toHaveAttribute("data-wrap-code", "false");
+      await toggleWrap(page, phone);
       await expect(setting).toHaveAttribute("aria-checked", "true");
+      await expect(column).toHaveAttribute("data-wrap-code", "true");
+      await trigger.click();
+      await expect(page.getByRole("menuitemcheckbox", { name: "Wrap code blocks" })).toHaveCount(0);
       const menuBox = (await page.getByTestId("preview-menu").boundingBox())!;
       expect(menuBox.x).toBeGreaterThanOrEqual(0);
       expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(width);
@@ -215,6 +229,7 @@ for (const width of [1440, 360, 393]) {
     expect(headingBox.y).toBeGreaterThanOrEqual(toolbarBox.y + toolbarBox.height);
     expect((await scroll.boundingBox())!.y).toBeGreaterThanOrEqual(toolbarBox.y + toolbarBox.height);
     expect(await codeText(page)).toBe(longSource);
+    await page.screenshot({ path: testInfo.outputPath(`wrap-switch-${width}-scrolled.png`), scale: "css", animations: "disabled" });
     await context.close();
   });
 }

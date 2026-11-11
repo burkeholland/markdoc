@@ -13,15 +13,20 @@ afterEach(() => {
 });
 
 describe("the preview menu", () => {
-  it("contains one global wrap setting and font choices without storing anything initially", async () => {
+  it("shows one top-level Wrap switch beside View, not another toggle inside the menu", async () => {
     const user = userEvent.setup();
     render(<PreviewMenu />);
     const trigger = screen.getByRole("button", { name: "Preview settings" });
     expect(trigger.textContent).toBe("View");
+    const wrap = screen.getByRole("switch", { name: "Wrap code blocks" });
+    expect(wrap).toHaveAttribute("aria-checked", "false");
+    expect(wrap).toHaveTextContent("Wrap code");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     await user.click(trigger);
     expect(screen.getByRole("menuitemradio", { name: /Instrument Sans/ }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("menuitemradio", { name: /^Inter$/ }).getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByRole("menuitemcheckbox", { name: "Wrap code blocks" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByRole("menuitemcheckbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("menu")).not.toHaveTextContent("Wrap code");
     expect(localStorage.getItem(PREVIEW_FONT_STORAGE_KEY)).toBeNull();
     expect(localStorage.getItem(PREVIEW_CODE_WRAP_STORAGE_KEY)).toBeNull();
   });
@@ -41,26 +46,27 @@ describe("the preview menu", () => {
     render(<PreviewMenu />);
     screen.getByRole("button", { name: "Preview settings" }).focus();
     await user.keyboard("{Enter}");
-    await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{Enter}");
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
     expect(localStorage.getItem(PREVIEW_FONT_STORAGE_KEY)).toBe("source-serif");
     expect(readPreviewFont()).toBe("source-serif");
   });
 
-  it("toggles wrapping with the keyboard and restores focus to the sticky menu trigger", async () => {
+  it("toggles wrapping directly by pointer, Space and Enter while keeping focus on the switch", async () => {
     const user = userEvent.setup();
     render(<PreviewMenu />);
-    const trigger = screen.getByRole("button", { name: "Preview settings" });
-    trigger.focus();
-    await user.keyboard("{Enter}");
-    expect(screen.getByRole("menuitemcheckbox", { name: "Wrap code blocks" })).toHaveFocus();
-    await user.keyboard(" ");
+    const wrap = screen.getByRole("switch", { name: "Wrap code blocks" });
+    await user.click(wrap);
     expect(localStorage.getItem(PREVIEW_CODE_WRAP_STORAGE_KEY)).toBe("on");
-    expect(trigger).toHaveFocus();
-    await user.keyboard("{Enter}");
-    expect(screen.getByRole("menuitemcheckbox", { name: "Wrap code blocks" })).toHaveAttribute("aria-checked", "true");
-    await user.keyboard("{Enter}");
+    expect(wrap).toHaveAttribute("aria-checked", "true");
+    expect(wrap).toHaveFocus();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await user.keyboard(" ");
     expect(localStorage.getItem(PREVIEW_CODE_WRAP_STORAGE_KEY)).toBe("off");
-    expect(trigger).toHaveFocus();
+    expect(wrap).toHaveAttribute("aria-checked", "false");
+    await user.keyboard("{Enter}");
+    expect(localStorage.getItem(PREVIEW_CODE_WRAP_STORAGE_KEY)).toBe("on");
+    expect(wrap).toHaveAttribute("aria-checked", "true");
+    expect(wrap).toHaveFocus();
   });
 
   it("falls back to the default for an unknown stored value", () => {
