@@ -73,7 +73,7 @@ test.describe("privacy-safe sign out", () => {
     expect(await page.evaluate((key) => localStorage.getItem(key), registryKey)).toBeNull();
 
     await page.getByRole("button", { name: "Sign out" }).click();
-    await page.waitForURL((url) => !url.pathname.startsWith("/api/auth/signout"));
+    await page.waitForURL((url) => !url.pathname.startsWith("/api/auth/signout"), { waitUntil: "load" });
     expect(await page.evaluate(async () => (await fetch("/api/me")).status)).toBe(401);
 
     const bob = await signInWithin(context, `signout-bob-${Date.now()}`);
