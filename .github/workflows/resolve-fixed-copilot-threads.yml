@@ -1,0 +1,80 @@
+# Copilot cloud automations can reply to review threads but can't resolve them,
+# and the main ruleset requires resolved conversations before merge.
+# This resolves a thread only when all of these hold:
+#   - Copilot code review started the thread
+#   - the repo owner (the automation's identity) replied "Fixed in <sha>"
+#   - <sha> is the PR's current head
+#   - Copilot's latest review of that head added no new comments
+name: Resolve fixed Copilot threads
+
+on:
+  pull_request_review:
+    types: [submitted]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: resolve-copilot-threads
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const REVIEWER = "copilot-pull-request-reviewer";
+            const prNumbers = context.payload.pull_request
+              ? [context.payload.pull_request.number]
+              : (await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }))
+                  .map((p) => p.number);
+
+            for (const number of prNumbers) {
+              const { repository } = await github.graphql(
+                `query($owner:String!,$repo:String!,$number:Int!){
+                  repository(owner:$owner,name:$repo){
+                    pullRequest(number:$number){
+                      state headRefName headRefOid
+                      reviews(last:50){nodes{author{login} commit{oid} submittedAt comments{totalCount}}}
+                      reviewThreads(first:100){nodes{id isResolved
+                        comments(first:50){nodes{author{login} body}}}}
+                    }}}`,
+                { owner, repo, number }
+              );
+              const pr = repository.pullRequest;
+              if (pr.state !== "OPEN" || !pr.headRefName.startsWith("copilot/")) continue;
+              const head = pr.headRefOid;
+
+              const latest = pr.reviews.nodes
+                .filter((r) => r.author?.login === REVIEWER && r.commit?.oid === head)
+                .sort((a, b) => a.submittedAt.localeCompare(b.submittedAt))
+                .pop();
+              if (!latest || latest.comments.totalCount !== 0) {
+                core.info(`#${number}: no clean Copilot review of ${head.slice(0, 7)}; skipping`);
+                continue;
+              }
+
+              for (const t of pr.reviewThreads.nodes) {
+                if (t.isResolved) continue;
+                const [first, ...replies] = t.comments.nodes;
+                if (first?.author?.login !== REVIEWER) continue;
+                const fixed = replies.some((c) => {
+                  const m = c.author?.login === owner && /^Fixed in ([0-9a-f]{7,40})\b/.exec(c.body.trim());
+                  return m && head.startsWith(m[1]);
+                });
+                if (!fixed) continue;
+                await github.graphql(
+                  `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`,
+                  { id: t.id }
+                );
+                core.notice(`#${number}: resolved Copilot thread ${t.id} (fixed in ${head.slice(0, 7)})`);
+              }
+            }
