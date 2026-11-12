@@ -9,6 +9,8 @@ import { TooltipProvider } from "@/components/ui/primitives";
 import type { DocumentDto } from "@/server/dto";
 import type { SyncStatusDto } from "@/lib/api";
 
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   return {

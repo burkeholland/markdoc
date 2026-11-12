@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   Check,
@@ -1250,6 +1251,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
 
 export const Header = memo(function Header(props: HeaderProps) {
   const { session, doc, compact, githubConfigured, embed = false, connectAgentNonce = 0 } = props;
+  const router = useRouter();
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = useSessionValue(session, (current) => current.canWrite);
@@ -1443,7 +1445,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             ) : (
               <MenuItem icon={<LogIn size={15} />} onSelect={() => {
                 const { pathname, search, hash } = window.location;
-                window.location.assign(`/login?next=${encodeURIComponent(`${pathname}${search}${hash}`)}`);
+                router.push(`/login?next=${encodeURIComponent(`${pathname}${search}${hash}`)}`);
               }}>
                 Sign in
               </MenuItem>

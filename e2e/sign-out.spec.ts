@@ -56,7 +56,8 @@ test.describe("privacy-safe sign out", () => {
 
     const path = `/d/${docId}?from=shared#comments`;
     for (let visit = 0; visit < 2; visit++) {
-      await page.goto(path);
+      if (visit === 0) await page.goto(path);
+      else await page.reload();
       await waitForEditor(page);
       await page.getByTestId("more-menu").click();
       await expect(page.getByRole("menuitem", { name: "Sign out" })).toHaveCount(0);
