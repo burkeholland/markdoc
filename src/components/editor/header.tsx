@@ -936,6 +936,8 @@ export interface HeaderProps {
   isOwner: boolean;
   /** The server has a GitHub OAuth app; without it the GitHub entries are disabled and say why (#162). */
   githubConfigured: boolean;
+  /** False only for an anonymous visitor; signed-in users may lack a GitHub handle. */
+  authenticated?: boolean;
   onHome: () => void;
   /** Pane layout shown by the segmented control on phones. */
   layout: Layout;
@@ -1438,7 +1440,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<ArrowLeft size={15} />} onSelect={() => props.onHome()}>
               All documents
             </MenuItem>
-            {session.user.login ? (
+            {props.authenticated !== false ? (
               <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
                 Sign out
               </MenuItem>

@@ -46,6 +46,7 @@ export default async function DocumentPage({ params, searchParams }: PageProps<"
       }}
       githubAvailable={githubAvailable}
       githubConfigured={githubConfigured}
+      authenticated={!!user}
       initialHtml={initialHtml}
       embed={embed}
       embedParentOrigin={user?.embedParentOrigin}
