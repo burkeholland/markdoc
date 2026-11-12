@@ -32,6 +32,8 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const REVIEWER = "copilot-pull-request-reviewer";
+            const currentHead = async (pull_number) =>
+              (await github.rest.pulls.get({ owner, repo, pull_number })).data.head.sha;
             const prNumbers = context.payload.pull_request
               ? [context.payload.pull_request.number]
               : (await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }))
@@ -77,10 +79,22 @@ jobs:
                   return m && m[1] === head;
                 });
                 if (!fixed) continue;
+                if ((await currentHead(number)) !== head) {
+                  core.warning(`#${number}: head moved; stopping`);
+                  break;
+                }
                 await github.graphql(
                   `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`,
                   { id: t.id }
                 );
+                if ((await currentHead(number)) !== head) {
+                  await github.graphql(
+                    `mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`,
+                    { id: t.id }
+                  );
+                  core.warning(`#${number}: head moved during resolve; reopened ${t.id} and stopped`);
+                  break;
+                }
                 core.notice(`#${number}: resolved Copilot thread ${t.id} (fixed in ${head.slice(0, 7)})`);
               }
             }
