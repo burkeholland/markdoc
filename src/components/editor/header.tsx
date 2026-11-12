@@ -29,6 +29,7 @@ import {
   Eye,
   PenLine,
   MessageSquarePlus,
+  LogIn,
   LogOut,
   ArrowLeft,
   RefreshCw,
@@ -1435,9 +1436,18 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<ArrowLeft size={15} />} onSelect={() => props.onHome()}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
-              Sign out
-            </MenuItem>
+            {session.user.login ? (
+              <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+                Sign out
+              </MenuItem>
+            ) : (
+              <MenuItem icon={<LogIn size={15} />} onSelect={() => {
+                const { pathname, search, hash } = window.location;
+                window.location.assign(`/login?next=${encodeURIComponent(`${pathname}${search}${hash}`)}`);
+              }}>
+                Sign in
+              </MenuItem>
+            )}
             {props.isOwner && (
               <>
                 <MenuSeparator />

@@ -1,7 +1,7 @@
 import { expect, test } from "./fixtures";
 import type { BrowserContext, Page } from "@playwright/test";
 import * as Y from "yjs";
-import { codeText, createDocument, devLogin, focusCodeEnd, openDocument, signIn } from "./helpers";
+import { codeText, createDocument, devLogin, focusCodeEnd, openDocument, signIn, waitForEditor, waitForHydration } from "./helpers";
 
 const registryKey = "markdoc:idb-docs";
 
@@ -41,6 +41,41 @@ async function signInWithin(context: BrowserContext, login: string): Promise<Pag
 }
 
 test.describe("privacy-safe sign out", () => {
+  test("anonymous document visitors can sign in and return to the document", async ({ browser }) => {
+    const { context, page } = await signIn(browser, `signout-shared-${Date.now()}`);
+    const docId = await createDocument(page, "# Shared document\n");
+    expect((await page.request.patch(`/api/documents/${docId}`, { data: { linkAccess: "comment" } })).ok()).toBeTruthy();
+    await openDocument(page, docId);
+    await page.getByTestId("more-menu").click();
+    await expect(page.getByRole("menuitem", { name: "Sign in", exact: true })).toHaveCount(0);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
+    await page.waitForURL(/\/signout/);
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await page.waitForURL((url) => url.pathname === "/");
+
+    const path = `/d/${docId}?from=shared#comments`;
+    for (let visit = 0; visit < 2; visit++) {
+      await page.goto(path);
+      await waitForEditor(page);
+      await page.getByTestId("more-menu").click();
+      await expect(page.getByRole("menuitem", { name: "Sign out" })).toHaveCount(0);
+      await expect(page.getByRole("menuitem", { name: "Sign in", exact: true })).toBeVisible();
+    }
+    await page.getByRole("menuitem", { name: "Sign in", exact: true }).click();
+    await page.waitForURL((url) => url.pathname === "/login");
+    expect(new URL(page.url()).searchParams.get("next")).toBe(path);
+    await waitForHydration(page);
+    await page.getByTestId("dev-login").fill(`signout-return-${Date.now()}`);
+    await page.getByTestId("dev-login-submit").click();
+    await page.waitForURL((url) => `${url.pathname}${url.search}${url.hash}` === path);
+    await waitForEditor(page);
+    await page.getByTestId("more-menu").click();
+    await expect(page.getByRole("menuitem", { name: "Sign out" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Sign in", exact: true })).toHaveCount(0);
+    await context.close();
+  });
+
   test("removes every offline mirror before another user signs in in the same browser", async ({ browser }) => {
     test.setTimeout(180_000);
     const marker = `private-marker-${Date.now()}`;
