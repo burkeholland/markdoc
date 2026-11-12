@@ -2,7 +2,7 @@
 # and the main ruleset requires resolved conversations before merge.
 # This resolves a thread only when all of these hold:
 #   - Copilot code review started the thread
-#   - the repo owner (the automation's identity) replied "Fixed in <sha>"
+#   - the repo owner (the automation's identity) replied "Fixed in <full 40-char sha>"
 #   - <sha> is the PR's current head
 #   - Copilot's latest review of that head added no new comments
 name: Resolve fixed Copilot threads
@@ -43,15 +43,21 @@ jobs:
                   repository(owner:$owner,name:$repo){
                     pullRequest(number:$number){
                       state headRefName headRefOid
-                      reviews(last:50){nodes{author{login} commit{oid} submittedAt comments{totalCount}}}
-                      reviewThreads(first:100){nodes{id isResolved
-                        comments(first:50){nodes{author{login} body}}}}
+                      reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} commit{oid} submittedAt comments{totalCount}}}
+                      reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved
+                        comments(first:100){pageInfo{hasNextPage} nodes{author{login} body}}}}
                     }}}`,
                 { owner, repo, number }
               );
               const pr = repository.pullRequest;
               if (pr.state !== "OPEN" || !pr.headRefName.startsWith("copilot/")) continue;
               const head = pr.headRefOid;
+              // Fail closed: if any list is truncated, leave the PR for a person.
+              if (pr.reviews.pageInfo.hasPreviousPage || pr.reviewThreads.pageInfo.hasNextPage ||
+                  pr.reviewThreads.nodes.some((t) => t.comments.pageInfo.hasNextPage)) {
+                core.warning(`#${number}: too many reviews, threads or comments to check; skipping`);
+                continue;
+              }
 
               const latest = pr.reviews.nodes
                 .filter((r) => r.author?.login === REVIEWER && r.commit?.oid === head)
@@ -67,8 +73,8 @@ jobs:
                 const [first, ...replies] = t.comments.nodes;
                 if (first?.author?.login !== REVIEWER) continue;
                 const fixed = replies.some((c) => {
-                  const m = c.author?.login === owner && /^Fixed in ([0-9a-f]{7,40})\b/.exec(c.body.trim());
-                  return m && head.startsWith(m[1]);
+                  const m = c.author?.login === owner && /^Fixed in ([0-9a-f]{40})\b/.exec(c.body.trim());
+                  return m && m[1] === head;
                 });
                 if (!fixed) continue;
                 await github.graphql(
