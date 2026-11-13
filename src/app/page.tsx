@@ -38,7 +38,7 @@ function Feature({ icon, title, children }: { icon: React.ReactNode; title: stri
   return (
     <div className="rounded-2xl border border-line bg-surface p-5">
       <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent">{icon}</div>
-      <h3 className="text-[15px] font-semibold text-ink">{title}</h3>
+      <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
       <p className="mt-1 text-sm leading-6 text-ink-3">{children}</p>
     </div>
   );
