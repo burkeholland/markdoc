@@ -827,6 +827,7 @@ describe("PresenceStack", () => {
       "bob",
       "agent-id",
     ]);
+    expect(screen.getAllByTestId("presence-avatar").map((avatar) => avatar.style.zIndex)).toEqual(["3", "2", "1"]);
     expect(within(trigger).getByText("+2")).toBeInTheDocument();
     expect(within(trigger).getByRole("img", { name: "Copilot CLI (agent)" })).toBeInTheDocument();
     expect(screen.getByTestId("presence-avatar-busy")).toHaveAccessibleName("Burke's Copilot CLI is working");

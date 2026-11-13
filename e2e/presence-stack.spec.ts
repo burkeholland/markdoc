@@ -36,6 +36,16 @@ test("earlier presence avatars appear above later avatars and overflow", async (
   await openDocument(dave.page, docId);
   await expect(stack).toContainText("+1");
   expect(await overlapWinners()).toEqual([{ overlap: 8, winner: 0 }, { overlap: 8, winner: 1 }]);
+  const overflowWinner = await stack.evaluate((element) => {
+    const avatars = element.querySelectorAll<HTMLElement>('[data-testid="presence-avatar"]');
+    const last = avatars[2];
+    const overflow = Array.from(element.querySelectorAll<HTMLElement>(".avatar")).find((item) => item.textContent === "+1")!;
+    const left = last.getBoundingClientRect();
+    const right = overflow.getBoundingClientRect();
+    const hit = document.elementFromPoint((left.right + right.left) / 2, (left.top + left.bottom) / 2);
+    return { overlap: left.right - right.left, winner: hit?.closest('[data-testid="presence-avatar"]') === last };
+  });
+  expect(overflowWinner).toEqual({ overlap: 8, winner: true });
   await stack.click();
   await expect(alice.page.getByTestId("presence-row")).toHaveCount(4);
 });
