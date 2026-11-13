@@ -50,7 +50,9 @@ function Landing() {
       <header className="app-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Wordmark />
         <Link href="/login" className="btn btn-primary gap-2">
-          <GitHubIcon size={16} /> Sign in with GitHub
+          <GitHubIcon size={16} />
+          <span className="sm:hidden">Sign in</span>
+          <span className="hidden sm:inline">Sign in with GitHub</span>
         </Link>
       </header>
       <section className="mx-auto max-w-6xl px-6 pb-16 pt-12">
