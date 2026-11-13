@@ -18,8 +18,10 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
+# resolveReviewThread returns FORBIDDEN for GITHUB_TOKEN without contents: write
+# (see github/gh-aw#35726). The script never touches repository contents.
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 
