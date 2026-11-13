@@ -47,7 +47,9 @@
     ".next-e2e-startup-59152-55822/types/**/*.ts",
     ".next-e2e-startup-59152-55822/dev/types/**/*.ts",
     ".next-e2e-startup-59152-59544/types/**/*.ts",
-    ".next-e2e-startup-59152-59544/dev/types/**/*.ts"
+    ".next-e2e-startup-59152-59544/dev/types/**/*.ts",
+    ".next-manual-3917/types/**/*.ts",
+    ".next-manual-3917/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
