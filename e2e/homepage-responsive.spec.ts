@@ -35,3 +35,13 @@ test("homepage sign-in action stays on one line beside the wordmark at 320px", a
   const desktopLabel = await signIn.evaluate((link) => (link as HTMLElement).innerText.replace(/\s+/g, " ").trim());
   expect(desktopLabel, "desktop label keeps the GitHub detail").toBe("Sign in with GitHub");
 });
+
+test("homepage offers a next step after the features on phones", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const nextStep = page.locator('main a[href="/login"]').last();
+  await expect(nextStep).toHaveText("Get started");
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(nextStep).toBeInViewport();
+});

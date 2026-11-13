@@ -90,6 +90,11 @@ function Landing() {
             Open any Markdown file from a gist or repository. Publishing creates a real commit on the branch you choose.
           </Feature>
         </div>
+        <div className="mt-8 flex justify-center">
+          <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
+            Get started <ArrowRight size={18} />
+          </Link>
+        </div>
       </section>
     </main>
   );
