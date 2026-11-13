@@ -715,10 +715,11 @@ export function PresenceStack({ session, onJump, onCancelRequest, onConnectAgent
           data-testid="presence"
           aria-label={`${users.length} ${users.length === 1 ? "person" : "people"} here: ${users.map(label).join(", ")}${waiting ? `; ${waitingLabel(pending.length)}` : ""}`}
         >
-          {shown.map((u) => (
+          {shown.map((u, index) => (
             <Tip key={u.id} label={u.isAgent && busy.has(u.name) ? `${label(u)} — working` : label(u)}>
               <span
                 className={cn("relative inline-flex transition-opacity", !u.isLocal && isIdle(u.idleSince, now) && "opacity-40")}
+                style={{ zIndex: shown.length - index }}
                 data-testid="presence-avatar"
                 data-user-id={u.id}
                 data-idle={!u.isLocal && isIdle(u.idleSince, now) ? "" : undefined}
