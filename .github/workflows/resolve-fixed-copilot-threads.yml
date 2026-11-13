@@ -22,13 +22,17 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: resolve-copilot-threads
-  cancel-in-progress: false
 
 jobs:
   resolve:
-    if: github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, 'REVIEW '))
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == github.repository_owner &&
+       startsWith(github.event.comment.body, 'REVIEW '))
+    concurrency:
+      group: resolve-copilot-threads
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
