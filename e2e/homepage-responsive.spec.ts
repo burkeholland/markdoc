@@ -1,5 +1,13 @@
 import { test, expect } from "./fixtures";
 
+test("homepage exposes its header as a banner landmark separate from main", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(page.getByRole("banner")).toHaveCount(1);
+  await expect(page.getByRole("main")).toHaveCount(1);
+  await expect(page.getByRole("banner").locator('a[href="/login"]')).toBeVisible();
+});
+
 test("homepage sign-in action stays on one line beside the wordmark at 320px", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 });
   await page.goto("/");
