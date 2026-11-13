@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import type { Metadata } from "next";
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { signIn, auth, demoLoginEnabled, devLoginEnabled, githubConfigured } from "@/auth";
@@ -100,6 +101,9 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
           </form>
         )}
         <p className="mt-6 text-center text-xs text-ink-4">Markdoc asks for access to your gists and repositories so it can publish documents on your behalf.</p>
+        <Link href="/" className="mt-4 block text-center text-sm text-accent hover:underline" data-testid="login-home">
+          Back to homepage
+        </Link>
       </div>
     </main>
   );
