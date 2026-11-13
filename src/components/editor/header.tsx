@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   Check,
@@ -29,6 +30,7 @@ import {
   Eye,
   PenLine,
   MessageSquarePlus,
+  LogIn,
   LogOut,
   ArrowLeft,
   RefreshCw,
@@ -935,6 +937,8 @@ export interface HeaderProps {
   isOwner: boolean;
   /** The server has a GitHub OAuth app; without it the GitHub entries are disabled and say why (#162). */
   githubConfigured: boolean;
+  /** False only for an anonymous visitor; signed-in users may lack a GitHub handle. */
+  authenticated?: boolean;
   onHome: () => void;
   /** Pane layout shown by the segmented control on phones. */
   layout: Layout;
@@ -1250,6 +1254,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
 
 export const Header = memo(function Header(props: HeaderProps) {
   const { session, doc, compact, githubConfigured, embed = false, connectAgentNonce = 0 } = props;
+  const router = useRouter();
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = useSessionValue(session, (current) => current.canWrite);
@@ -1436,9 +1441,18 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem icon={<ArrowLeft size={15} />} onSelect={() => props.onHome()}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
-              Sign out
-            </MenuItem>
+            {props.authenticated !== false ? (
+              <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+                Sign out
+              </MenuItem>
+            ) : (
+              <MenuItem icon={<LogIn size={15} />} onSelect={() => {
+                const { pathname, search, hash } = window.location;
+                router.push(`/login?next=${encodeURIComponent(`${pathname}${search}${hash}`)}`);
+              }}>
+                Sign in
+              </MenuItem>
+            )}
             {props.isOwner && (
               <>
                 <MenuSeparator />

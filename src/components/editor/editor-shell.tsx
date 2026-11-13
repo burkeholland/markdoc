@@ -149,6 +149,8 @@ export interface EditorShellProps {
   githubAvailable: boolean;
   /** The server has a GitHub OAuth app; without it the GitHub entry points are disabled (#162). */
   githubConfigured: boolean;
+  /** False for an anonymous visitor on a shared link; a signed-in user may have no GitHub handle. */
+  authenticated?: boolean;
   /** Canvas mode keeps editing controls but removes navigation and account/share menus. */
   embed?: boolean;
   /** Exact shell origin and expiry carried by a validated embed cookie. */
@@ -1691,6 +1693,7 @@ export function EditorShell({
   user,
   githubAvailable,
   githubConfigured,
+  authenticated = true,
   initialHtml = null,
   embed = false,
   embedParentOrigin,
@@ -3379,6 +3382,7 @@ export function EditorShell({
           publishing={publishing}
           isOwner={isOwner}
           githubConfigured={githubConfigured}
+          authenticated={authenticated}
           onHome={goHome}
           layout={shownLayout}
           onLayout={setLayout}

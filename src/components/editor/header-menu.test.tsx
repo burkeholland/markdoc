@@ -9,6 +9,8 @@ import { TooltipProvider } from "@/components/ui/primitives";
 import type { DocumentDto } from "@/server/dto";
 import type { SyncStatusDto } from "@/lib/api";
 
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   return {
@@ -529,6 +531,18 @@ describe("editor header More menu authority", () => {
   // click's async timing that actually causes the menu to stay open. The regression guards are
   // the mouse-driven e2e/reader.spec.ts:182 test and the e2e/prod-smoke.spec.ts "Open reader view"
   // test, both of which fail against main's header.tsx and pass against this PR's.
+  it("keeps Sign out for a signed-in user without a GitHub handle and offers Sign in only when anonymous", async () => {
+    const signedIn = await renderStrict(header(headerProps(createSession(), createActions())));
+    openMenu();
+    expect(screen.queryByRole("menuitem", { name: "Sign out" })).not.toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Sign in" })).toBeNull();
+    await signedIn.render(header({ ...headerProps(createSession(), createActions()), authenticated: false }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    openMenu();
+    expect(screen.queryByRole("menuitem", { name: "Sign in" })).not.toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Sign out" })).toBeNull();
+  });
+
   it("closes before opening the reader view in a new tab (basic coverage)", async () => {
     const session = createSession();
     const actions = createActions();
