@@ -27,6 +27,7 @@ type ElementProps = {
   action?: (formData: FormData) => Promise<unknown>;
   children?: ReactNode;
   "data-testid"?: string;
+  href?: string;
 };
 
 function findForm(node: ReactNode, testId: string): ReactElement<ElementProps> | null {
@@ -72,6 +73,15 @@ afterEach(() => {
 });
 
 describe("LoginPage return paths", () => {
+  it("offers a link back to the homepage", async () => {
+    authMocks.auth.mockResolvedValue(null);
+    const page = await LoginPage(pageProps("/"));
+    const homeLink = findByTestId(page, "login-home");
+
+    expect(homeLink?.props.href).toBe("/");
+    expect(homeLink?.props.children).toBe("Back to homepage");
+  });
+
   it.each([
     ["/settings", "/settings"],
     ["//example.invalid/path", "/"],
