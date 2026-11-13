@@ -30,4 +30,8 @@ test("homepage sign-in action stays on one line beside the wordmark at 320px", a
   expect(brandBox).not.toBeNull();
   expect(signInBox).not.toBeNull();
   expect(signInBox!.x - brandBox!.x - brandBox!.width, "wordmark and sign-in action have separation").toBeGreaterThanOrEqual(8);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const desktopLabel = await signIn.evaluate((link) => (link as HTMLElement).innerText.replace(/\s+/g, " ").trim());
+  expect(desktopLabel, "desktop label keeps the GitHub detail").toBe("Sign in with GitHub");
 });
