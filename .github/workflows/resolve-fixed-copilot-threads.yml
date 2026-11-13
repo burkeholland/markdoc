@@ -10,6 +10,10 @@ name: Resolve fixed Copilot threads
 on:
   pull_request_review:
     types: [submitted]
+  # Runs started by Copilot's own reviews fail before any job starts, so also run on the
+  # automation's hourly "REVIEW RETRY/DONE" PR comments.
+  issue_comment:
+    types: [created]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -18,12 +22,17 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: resolve-copilot-threads
-  cancel-in-progress: false
 
 jobs:
   resolve:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == github.repository_owner &&
+       startsWith(github.event.comment.body, 'REVIEW '))
+    concurrency:
+      group: resolve-copilot-threads
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,8 +43,9 @@ jobs:
             const REVIEWER = "copilot-pull-request-reviewer";
             const currentHead = async (pull_number) =>
               (await github.rest.pulls.get({ owner, repo, pull_number })).data.head.sha;
-            const prNumbers = context.payload.pull_request
-              ? [context.payload.pull_request.number]
+            const triggerPr = context.payload.pull_request ?? context.payload.issue;
+            const prNumbers = triggerPr
+              ? [triggerPr.number]
               : (await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }))
                   .map((p) => p.number);
 
