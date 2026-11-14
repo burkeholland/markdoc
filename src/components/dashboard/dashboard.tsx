@@ -1,5 +1,5 @@
 "use client";
-import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
+import { Avatar, Dialog, DialogContent, DialogOverlay, DialogPortal, DialogPrimitiveContent, DialogTitle, DialogTrigger, Kbd, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
@@ -16,7 +16,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, Settings, Share2, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
+import { BookOpen, CalendarCheck, Check, ChevronDown, DraftingCompass, File, FilePlus2, Folder as FolderIcon, GitBranch, House, Inbox, ListChecks, Loader2, LogOut, Menu as MenuIcon, MoreHorizontal, PenLine, Plus, RotateCcw, Scale, Search, Settings, Share2, FileText, Sparkles, Star, Trash2, Upload, Users, X } from "lucide-react";
 import { api, apiErrorText, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -51,7 +51,6 @@ type SearchDoc = SearchResultDto;
 const SEARCH_DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
 const DASHBOARD_SEARCH_STORAGE_KEY = "markdoc:dashboardSearch";
-const STARRED_STRIP_MAX = 6;
 const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
 const SEARCH_SHORTCUT_BLOCKED = 'input, textarea, select, dialog, [role="dialog"], [data-testid="command-palette"], [contenteditable]:not([contenteditable="false"])';
 
@@ -266,17 +265,6 @@ interface SearchError {
 
 /** The busy key `create()` publishes for a blank document (no template). */
 const CREATE_BLANK_KEY = "blank";
-// The card is half width beside "Open from GitHub", so its layout follows the card's width, not the viewport's.
-const CREATE_CARD_CLASS =
-  "@container group flex flex-wrap items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md";
-const CREATE_BLANK_BUTTON_CLASS =
-  "flex w-full items-center gap-4 rounded-t-2xl p-5 text-left @[32rem]:w-auto @[32rem]:flex-1 @[32rem]:rounded-none @[32rem]:rounded-l-2xl";
-const CREATE_BLANK_ICON_FRAME_CLASS =
-  "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-on-accent";
-const CREATE_BLANK_NAME_CLASS = "block text-[15px] font-semibold text-ink";
-const CREATE_BLANK_DESCRIPTION_CLASS = "block text-sm text-ink-3";
-const CREATE_BLANK_NAME_TEXT = "New document";
-const CREATE_BLANK_DESCRIPTION_TEXT = "Start with a blank Markdown page.";
 const CREATE_GUIDED_ROOT_CLASS = "mb-5 text-center";
 const CREATE_GUIDED_PRIMARY_CLASS = "text-sm font-medium text-ink-2";
 const CREATE_GUIDED_SECONDARY_CLASS = "mt-1 text-sm text-ink-3";
@@ -296,45 +284,17 @@ interface NoticePublication {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-type FilterDefinition = { readonly value: Filter; readonly label: string };
+type NavView = { readonly value: Exclude<Filter, "mine">; readonly label: string; readonly icon: typeof House };
 
-const FILTERS = Object.freeze([
-  Object.freeze({ value: "all", label: "All" }),
-  Object.freeze({ value: "mine", label: "Owned by me" }),
-  Object.freeze({ value: "shared", label: "Shared with me" }),
-  Object.freeze({ value: "starred", label: "Starred" }),
-  Object.freeze({ value: "trash", label: "Trash" }),
-] as const satisfies readonly FilterDefinition[]);
-const FILTER_GROUP_CLASS =
-  "flex min-w-0 max-w-full flex-wrap rounded-lg border border-line bg-surface p-0.5 text-xs";
-const FILTER_GROUP_LABEL = "Document filters";
+/** The library sidebar's views. "Owned by me" is the Owner menu in the list header, not a view. */
+const NAV_VIEWS: readonly NavView[] = Object.freeze([
+  Object.freeze({ value: "all", label: "All documents", icon: House }),
+  Object.freeze({ value: "starred", label: "Starred", icon: Star }),
+  Object.freeze({ value: "shared", label: "Shared with me", icon: Users }),
+  Object.freeze({ value: "trash", label: "Trash", icon: Trash2 }),
+]);
 
-function filterButtonClass(selected: boolean) {
-  return cn(
-    "tap-target relative min-h-11 min-w-11 rounded-md px-2.5 py-1 md:min-h-6 md:min-w-0",
-    selected
-      ? "bg-inverse text-white"
-      : "text-ink-3 hover:text-ink",
-  );
-}
-
-function filterDestination(
-  key: string,
-  current: number,
-): number | null {
-  if (current < 0 || current >= FILTERS.length) return null;
-  if (key === "ArrowRight" || key === "ArrowDown") {
-    return (current + 1) % FILTERS.length;
-  }
-  if (key === "ArrowLeft" || key === "ArrowUp") {
-    return (current - 1 + FILTERS.length) % FILTERS.length;
-  }
-  if (key === "Home") return current === 0 ? null : 0;
-  if (key === "End") {
-    return current === FILTERS.length - 1 ? null : FILTERS.length - 1;
-  }
-  return null;
-}
+const NAV_ROW_CLASS = "flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 text-left text-sm transition md:min-h-9";
 
 const TRASH_RETENTION_DAYS = 30;
 
@@ -354,7 +314,7 @@ function StarButton({ starred, pending, onToggle, className }: { starred: boolea
       aria-label={starred ? "Unstar" : "Star"}
       title={starred ? "Unstar" : "Star"}
       className={cn(
-        "tap-target flex h-7 w-7 items-center justify-center rounded-md transition hover:bg-surface-3 focus-visible:opacity-100",
+        "tap-target relative flex h-7 w-7 items-center justify-center rounded-md transition hover:bg-surface-3 focus-visible:opacity-100",
         starred ? "text-amber-500" : "text-ink-4 opacity-0 group-hover:opacity-100 hover:text-ink-2",
         className,
       )}
@@ -426,7 +386,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [sharingDocument, setSharingDocument] = useState<{ id: string; title: string } | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
-  const filterButtons = useRef(new Map<Filter, HTMLButtonElement>());
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const longPressTimer = useRef<number | undefined>(undefined);
+  const longPressed = useRef<string | null>(null);
   const [searchMount] = useState(() => Symbol("dashboard-search"));
   const searchAuthority = useMemo<SearchAuthority>(
     () =>
@@ -1140,9 +1103,6 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             ? `No results for "${trimmed}".`
             : `${filtered.length} result${filtered.length === 1 ? "" : "s"} for "${trimmed}".`;
 
-  const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
-  const showStrip = filter === "all" && !trimmed && starred.length > 0;
-
   /**
    * File documents under a folder (or back to the top level for `null`). The server answers with the
    * ids it actually moved, so a document that was trashed or un-owned in between is simply left alone
@@ -1400,7 +1360,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             ? `Content search starts at ${MIN_QUERY_LENGTH} characters.`
             : "Try a different search."
           : selectedFolderIsEmpty
-            ? "Create a document above, then move it here from its card menu, or drag an existing card onto this folder."
+            ? "Create a document, then move it here from its row menu, or drag an existing row onto this folder."
             : selectedFolderFilterEmptyState
               ? selectedFolderFilterEmptyState.description
               : filter === "shared"
@@ -1410,20 +1370,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   : filter === "mine"
                     ? "Documents you own will appear here."
                     : folderSelection === TOP_LEVEL
-                      ? "Move documents here from a card menu, or choose All documents to see everything."
+                      ? "Move documents here from a row menu, or choose All documents to see everything."
                       : "Choose another filter to see more documents.";
   const welcomeTemplate = getTemplate(WELCOME_TEMPLATE_ID);
-  // Arrow keys move between filters (wrapping) and select the one they land on; Home and End jump to the ends.
-  const keyDownFilter = (value: Filter, event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
-    const index = FILTERS.findIndex((f) => f.value === value);
-    const destination = filterDestination(event.key, index);
-    if (destination === null) return;
-    event.preventDefault();
-    const next = FILTERS[destination]!.value;
-    changeFilter(next);
-    filterButtons.current.get(next)?.focus({ preventScroll: true });
-  };
   const keyDownAccountTrigger = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (accountOpen || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -1440,6 +1389,101 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     destination.focus({ preventScroll: true });
   };
 
+  const folderViewActive = filter === "all" || filter === "mine";
+  const selectedFolder = typeof folderSelection === "string" ? folders.folders.find((f) => f.id === folderSelection) : undefined;
+  const libraryTitle = filter === "trash" ? "Trash" : filter === "starred" ? "Starred" : filter === "shared" ? "Shared with me"
+    : folderSelection === TOP_LEVEL ? "Not in a folder" : (selectedFolder?.name ?? "All documents");
+  const navCount = (v: NavView["value"]) =>
+    v === "all" ? documents.length : v === "starred" ? documents.filter((d) => d.starred).length : v === "trash" ? (trash?.length ?? null) : documents.filter((d) => d.ownerId !== user.id).length;
+
+  const renderSidebar = (close?: () => void) => (
+    <div className="flex flex-col gap-4">
+      <div className="flex">
+        <button
+          type="button"
+          className="btn btn-primary min-h-11 flex-1 rounded-r-none md:min-h-9"
+          onClick={() => {
+            close?.();
+            void create();
+          }}
+          disabled={creating !== null}
+          data-testid="new-document"
+        >
+          {creating === CREATE_BLANK_KEY ? <Loader2 size={15} className="animate-spin" /> : <FilePlus2 size={15} />} New document
+        </button>
+        <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
+          <DialogTrigger asChild>
+            <button
+              type="button"
+              disabled={creating !== null}
+              className="btn btn-primary min-h-11 rounded-l-none border-l border-white/30 px-2.5 md:min-h-9"
+              aria-label="New document from template"
+              title="From template"
+              data-testid="new-from-template"
+            >
+              <ChevronDown size={14} />
+            </button>
+          </DialogTrigger>
+          <DialogContent title="New from template" description="Pick a starting point. Everything is plain Markdown you can change afterwards." wide>
+            <div data-testid="template-dialog">
+              <TemplateGrid onPick={(t) => void create(t)} busy={creating} />
+            </div>
+          </DialogContent>
+        </Dialog>
+      </div>
+      {close && (
+        <div className="flex flex-col gap-1 md:hidden">
+          <button type="button" className={cn(NAV_ROW_CLASS, "text-ink-2 hover:bg-surface-2")} onClick={() => { close(); fileImport.pick(); }} data-testid="open-file-mobile">
+            <Upload size={16} /> Import
+          </button>
+          {githubConfigured && (
+            <button type="button" className={cn(NAV_ROW_CLASS, "text-ink-2 hover:bg-surface-2")} onClick={() => { close(); setOpenPicker(true); }} data-testid="open-github-mobile">
+              <GitHubIcon size={16} /> Open from GitHub
+            </button>
+          )}
+        </div>
+      )}
+      <nav aria-label="Views">
+        <ul className="flex flex-col gap-0.5">
+          {NAV_VIEWS.map((v) => {
+            const Icon = v.icon;
+            const current = v.value === "all" ? folderViewActive && folderSelection === null : filter === v.value;
+            const count = navCount(v.value);
+            return (
+              <li key={v.value}>
+                <button
+                  type="button"
+                  className={cn(NAV_ROW_CLASS, current ? "bg-accent-soft font-medium text-accent" : "text-ink-2 hover:bg-surface-2")}
+                  aria-current={current ? "page" : undefined}
+                  onClick={() => {
+                    changeFilter(v.value);
+                    folders.select(null);
+                    close?.();
+                  }}
+                  data-testid={`filter-${v.value}`}
+                >
+                  <Icon size={16} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{v.label}</span>
+                  {count !== null && <span className="text-xs text-ink-3">{count}</span>}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+      <FolderRail
+        state={folders}
+        unfiledCount={documents.filter((d) => canFile(d) && d.folderId === null).length}
+        folderViewActive={folderViewActive}
+        onNavigate={() => {
+          if (!folderViewActive) changeFilter("all");
+          close?.();
+        }}
+        onDropDocuments={moveDocuments}
+      />
+    </div>
+  );
+
   return (
     <TooltipProvider>
       <OpeningDocumentBoundary pendingRef={openingDocumentRef}>
@@ -1453,8 +1497,19 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           {searchAnnouncement}
         </div>
         <header className="app-header sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
-          <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
-            <Link href="/" className="flex items-center gap-2.5" aria-label="Markdoc — all documents">
+          <div className="safe-x mx-auto flex h-16 max-w-[1600px] items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
+            <button
+              type="button"
+              className="icon-btn tap-target relative -ml-2 h-11 w-11 shrink-0 md:hidden"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open library"
+              aria-haspopup="dialog"
+              aria-expanded={drawerOpen}
+              data-testid="library-toggle"
+            >
+              <MenuIcon size={20} />
+            </button>
+            <Link href="/" className="flex shrink-0 items-center gap-2.5 md:w-[13.5rem]" aria-label="Markdoc — all documents">
               <Logo className="h-8 w-8" />
               <span className="wordmark hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
             </Link>
@@ -1513,125 +1568,38 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           </div>
         </header>
 
-        <section className="safe-x mx-auto max-w-6xl py-6 sm:py-8 sm:[--safe-pad:1.5rem]">
+        <div className="mx-auto flex max-w-[1600px] items-start">
+          <aside
+            className="sticky top-16 hidden h-[calc(100vh-4rem)] w-64 shrink-0 overflow-y-auto border-r border-line bg-surface px-3 py-4 md:block"
+            aria-label="Library"
+            data-testid="library-sidebar"
+          >
+            {renderSidebar()}
+          </aside>
+        <section className="safe-x min-w-0 flex-1 py-5 sm:py-6 md:[--safe-pad:2rem]">
           <NotificationsStrip />
-          <div className="mb-8 grid gap-3 sm:grid-cols-2">
-            <div className={cn(CREATE_CARD_CLASS, !githubConfigured && "sm:col-span-2")}>
-              <button
-                type="button"
-                onClick={() => void create()}
-                disabled={creating !== null}
-                className={CREATE_BLANK_BUTTON_CLASS}
-                data-testid="new-document"
-              >
-                <span className={CREATE_BLANK_ICON_FRAME_CLASS}>{creating === CREATE_BLANK_KEY ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
-                <span>
-                  <span className={CREATE_BLANK_NAME_CLASS}>{CREATE_BLANK_NAME_TEXT}</span>
-                  <span className={CREATE_BLANK_DESCRIPTION_CLASS}>{CREATE_BLANK_DESCRIPTION_TEXT}</span>
-                </span>
-              </button>
-              <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
-                <DialogTrigger asChild>
-                  <button
-                    type="button"
-                    disabled={creating !== null}
-                    className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-bl-2xl border-r border-t border-line px-3 text-sm text-ink-3 transition hover:bg-surface-2 hover:text-ink @[32rem]:flex-none @[32rem]:rounded-none @[32rem]:border-l @[32rem]:border-r-0 @[32rem]:border-t-0 @[32rem]:px-4"
-                    aria-label="New document from template"
-                    title="From template"
-                    data-testid="new-from-template"
-                  >
-                    <LayoutTemplate size={16} />
-                    <span>From template</span>
-                    <ChevronDown size={14} className="@max-[21rem]:hidden" />
-                  </button>
-                </DialogTrigger>
-                <DialogContent title="New from template" description="Pick a starting point. Everything is plain Markdown you can change afterwards." wide>
-                  <div data-testid="template-dialog">
-                    <TemplateGrid onPick={(t) => void create(t)} busy={creating} />
-                  </div>
-                </DialogContent>
-              </Dialog>
-              <button
-                type="button"
-                onClick={fileImport.pick}
-                disabled={creating !== null}
-                className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-br-2xl border-t border-line px-3 text-sm text-ink-3 transition hover:bg-surface-2 hover:text-ink @[32rem]:flex-none @[32rem]:rounded-none @[32rem]:rounded-r-2xl @[32rem]:border-l @[32rem]:border-t-0 @[32rem]:px-4"
-                aria-label="Open file…"
-                title="Open file… (.md, .txt, .html)"
-                data-testid="open-file"
-              >
-                <FolderOpen size={16} />
-                <span>Open file</span>
-              </button>
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+            <div className="min-w-0">
+              <h2 ref={documentsHeadingRef} tabIndex={-1} className="wordmark truncate text-3xl font-semibold text-ink outline-none" data-testid="library-title">
+                {libraryTitle}
+              </h2>
+              <p className="mt-0.5 text-sm text-ink-3" data-testid="library-count">
+                {filter === "trash" ? `${trash?.length ?? 0} in trash` : `${filtered.length} ${filtered.length === 1 ? "document" : "documents"}`}
+              </p>
             </div>
-            {githubConfigured && (
-              <button
-                type="button"
-                onClick={() => setOpenPicker(true)}
-                className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md"
-                data-testid="open-github"
-              >
-                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-inverse text-white">
-                  <GitHubIcon size={22} />
-                </span>
-                <span>
-                  <span className="block text-[15px] font-semibold text-ink">Open from GitHub</span>
-                  <span className="block text-sm text-ink-3">Edit a Markdown file from a gist or repository.</span>
-                </span>
+            <div className="hidden items-center gap-2 md:flex">
+              <button type="button" className="btn btn-outline" onClick={fileImport.pick} disabled={creating !== null} title="Open file… (.md, .txt, .html)" data-testid="open-file">
+                <Upload size={15} /> Import
               </button>
-            )}
+              {githubConfigured && (
+                <button type="button" className="btn btn-outline" onClick={() => setOpenPicker(true)} data-testid="open-github">
+                  <GitHubIcon size={15} /> Open from GitHub
+                </button>
+              )}
+            </div>
           </div>
 
-          {showStrip && (
-            <div className="mb-6" data-testid="starred-strip">
-              <div className="mb-2 flex items-center gap-2">
-                <h2 className="inline-flex items-center gap-1.5 text-sm font-semibold text-ink">
-                  <Star size={14} className="text-amber-500" fill="currentColor" /> Starred
-                </h2>
-                {starred.length > STARRED_STRIP_MAX && (
-                  // ≥ 44 px hit area on phone, ≥ 24 px on desktop (WCAG 2.2 target size, #116); negative
-                  // margins pull the padding back so the strip header barely moves.
-                  <button
-                    type="button"
-                    className="-my-2 ml-auto inline-flex min-h-11 items-center px-3 py-2 text-xs font-medium text-accent hover:underline md:-my-0.5 md:min-h-6 md:px-2 md:py-1"
-                    onClick={() => changeFilter("starred")}
-                    data-testid="show-all-starred"
-                  >
-                    Show all starred ({starred.length})
-                  </button>
-                )}
-              </div>
-              <ul className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
-                {starred.slice(0, STARRED_STRIP_MAX).map((d) => (
-                  <li key={d.id} className="group relative min-w-0">
-                    <Link
-                      href={`/d/${d.id}`}
-                      className="flex h-full flex-col gap-1 rounded-xl border border-line bg-surface px-3 py-2.5 pr-9 shadow-sm transition hover:border-accent hover:shadow-md"
-                      data-testid="starred-card"
-                    >
-                      <OpeningDocument />
-                      <span className="line-clamp-2 break-words text-[13px] font-semibold leading-4 text-ink">{d.title}</span>
-                      <span className="text-[11px] text-ink-4">{d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
-                    </Link>
-                    <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="absolute right-1.5 top-1.5" />
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Folders organize what a person owns, so the rail is out of the way in the trash and while
-              searching, where the list is not a folder's contents. */}
-          {filter !== "trash" && !trimmed && (
-            <FolderRail
-              state={folders}
-              totalCount={documents.length}
-              unfiledCount={documents.filter((d) => canFile(d) && d.folderId === null).length}
-              onDropDocuments={moveDocuments}
-            />
-          )}
-
-          {selectedIds.size > 0 && filter !== "trash" && (
+          {filter !== "trash" && selectedIds.size > 0 && (
             <SelectionBar
               count={selectedIds.size}
               folders={folders.folders}
@@ -1641,46 +1609,54 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             />
           )}
 
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h2 ref={documentsHeadingRef} tabIndex={-1} className="text-sm font-semibold text-ink">Documents</h2>
-            <div className="ml-auto flex min-h-8 min-w-0 max-w-full flex-wrap items-center gap-2 max-sm:basis-full" data-testid="dashboard-chips">
-              <label className="flex items-center gap-1.5 text-xs text-ink-3">
-                <span className="sr-only">Sort by</span>
-                <select
-                  className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink-2 focus-visible:border-accent"
-                  value={sort}
-                  onChange={(e) => changeSort(e.target.value as DashboardSort)}
-                  aria-label="Sort by"
-                  data-testid="sort-select"
-                >
-                  {SORT_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className={FILTER_GROUP_CLASS} role="toolbar" aria-label={FILTER_GROUP_LABEL}>
-                {FILTERS.map((f) => (
-                  <button
-                    key={f.value}
-                    ref={(element) => {
-                      if (element) filterButtons.current.set(f.value, element);
-                      else filterButtons.current.delete(f.value);
-                    }}
-                    type="button"
-                    className={filterButtonClass(filter === f.value)}
-                    onClick={() => changeFilter(f.value)}
-                    onKeyDown={(event) => keyDownFilter(f.value, event)}
-                    tabIndex={filter === f.value ? 0 : -1}
-                    aria-pressed={filter === f.value}
-                    data-testid={`filter-${f.value}`}
+          <div className="mb-3 flex flex-wrap items-center gap-2" data-testid="dashboard-chips">
+            {filter !== "trash" && (
+              <>
+                <label className="flex items-center">
+                  <span className="sr-only">Sort by</span>
+                  <select
+                    className="h-9 rounded-lg border border-line bg-surface px-2.5 text-sm text-ink-2 focus-visible:border-accent"
+                    value={sort}
+                    onChange={(e) => changeSort(e.target.value as DashboardSort)}
+                    aria-label="Sort by"
+                    data-testid="sort-select"
                   >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+                    {SORT_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {(filter === "all" || filter === "mine") && (
+                  <label className="flex items-center">
+                    <span className="sr-only">Owner</span>
+                    <select
+                      className="h-9 rounded-lg border border-line bg-surface px-2.5 text-sm text-ink-2 focus-visible:border-accent"
+                      value={filter === "mine" ? "mine" : "all"}
+                      onChange={(e) => changeFilter(e.target.value as Filter)}
+                      aria-label="Owner"
+                      data-testid="filter-owner"
+                    >
+                      <option value="all">Owner: anyone</option>
+                      <option value="mine">Owner: me</option>
+                    </select>
+                  </label>
+                )}
+                <button
+                  type="button"
+                  className={cn("btn btn-outline ml-auto min-h-11 md:hidden", selectMode && "border-accent text-accent")}
+                  onClick={() => {
+                    if (selectMode) clearSelection();
+                    setSelectMode(!selectMode);
+                  }}
+                  aria-pressed={selectMode}
+                  data-testid="select-mode"
+                >
+                  {selectMode ? <X size={15} /> : <Check size={15} />} {selectMode ? "Done" : "Select"}
+                </button>
+              </>
+            )}
           </div>
 
           {filter !== "trash" && contentSearchLimited && filtered.length > 0 && (
@@ -1763,13 +1739,26 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
           ) : (
-            <ul ref={searchResultListRef} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
-              {filtered.map((d) => (
+            <div className="overflow-hidden rounded-xl border border-line bg-surface">
+              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 md:flex" aria-hidden="true">
+                <span className="w-6 shrink-0" />
+                <span className="w-9 shrink-0" />
+                <span className="min-w-0 flex-1">Name</span>
+                <span className="w-40 shrink-0">Folder</span>
+                <span className="w-16 shrink-0">Owner</span>
+                <span className="w-24 shrink-0">Last edited</span>
+              </div>
+            <ul ref={searchResultListRef} className="divide-y divide-line" data-testid="document-list">
+              {filtered.map((d) => {
+                const folder = d.folderId ? folders.folders.find((f) => f.id === d.folderId) : undefined;
+                const selected = selectedIds.has(d.id);
+                const showCheckbox = canFile(d);
+                return (
                 <li
                   key={d.id}
-                  className="group relative min-w-0"
+                  className={cn("group relative flex min-w-0 items-center gap-1 pl-1 pr-1 md:gap-3 md:pl-3", selected ? "bg-accent-soft" : "hover:bg-surface-2")}
                   data-testid={trimmed ? "search-result" : undefined}
-                  // Dragging a selected card takes the whole selection; dragging an unselected one takes
+                  // Dragging a selected row takes the whole selection; dragging an unselected one takes
                   // just it, so a drag never silently moves documents the person forgot were ticked.
                   draggable={canFile(d)}
                   onDragStart={(event) => {
@@ -1778,82 +1767,126 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     event.dataTransfer.setData(DOCUMENT_DRAG_TYPE, JSON.stringify(ids));
                     event.dataTransfer.effectAllowed = "move";
                   }}
-                  data-selected={selectedIds.has(d.id) || undefined}
+                  // A long press selects the row on a phone, where there is no hover to reveal the checkbox.
+                  onPointerDown={(event) => {
+                    if (event.pointerType !== "touch" || !canFile(d)) return;
+                    window.clearTimeout(longPressTimer.current);
+                    longPressTimer.current = window.setTimeout(() => {
+                      longPressed.current = d.id;
+                      setSelectMode(true);
+                      toggleSelected(d.id);
+                    }, 500);
+                  }}
+                  onPointerUp={() => window.clearTimeout(longPressTimer.current)}
+                  onPointerCancel={() => window.clearTimeout(longPressTimer.current)}
+                  onPointerMove={() => window.clearTimeout(longPressTimer.current)}
+                  data-selected={selected || undefined}
                 >
+                  {showCheckbox ? (
+                    // A real checkbox, so the row is selectable from the keyboard and screen readers read its state.
+                    <label
+                      className={cn(
+                        "tap-target document-selection-target relative inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center",
+                        selectMode || selectedIds.size > 0 ? "max-md:w-11" : "max-md:hidden",
+                      )}
+                    >
+                      <span className="sr-only">Select {d.title}</span>
+                      <input
+                        type="checkbox"
+                        className="relative z-10 m-0 h-5 w-5 cursor-pointer accent-[var(--accent)]"
+                        checked={selected}
+                        onChange={() => toggleSelected(d.id)}
+                        data-testid="select-document"
+                        data-document-id={d.id}
+                      />
+                    </label>
+                  ) : (
+                    <span className="hidden w-6 shrink-0 md:block" />
+                  )}
                   <Link
                     href={`/d/${d.id}`}
-                    className={cn(
-                      "flex h-full flex-col rounded-2xl border bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md",
-                      selectedIds.has(d.id) ? "border-accent ring-1 ring-accent" : "border-line",
-                    )}
+                    className="flex min-h-14 min-w-0 flex-1 items-center gap-3 px-2 py-2 outline-none focus-visible:ring-2 focus-visible:ring-accent md:min-h-16"
                     data-testid="document-card"
+                    onClick={(event) => {
+                      if (longPressed.current === d.id) {
+                        longPressed.current = null;
+                        event.preventDefault();
+                      } else if (selectMode) {
+                        event.preventDefault();
+                        if (canFile(d)) toggleSelected(d.id);
+                      }
+                    }}
                   >
                     <OpeningDocument />
-                    {/* `pr-8` on an own-document card keeps the storage badge clear of the ⋮ menu. */}
-                    <div className={cn("mb-2 flex items-start justify-between gap-2", canFile(d) && "pr-8")}>
-                      <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">
-                        <Highlight text={d.title} needle={trimmed} />
-                      </h3>
-                      <StorageBadge doc={d} />
-                    </div>
-                    {d.snippet ? (
-                      <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-2" data-testid="search-snippet">
-                        <Highlight text={d.snippet} needle={trimmed} />
-                      </p>
-                    ) : (
-                      <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
-                    )}
-                    {/* Room for the star, plus the select box beside it on an own-document card. */}
-                    <div className={cn("mt-3 flex items-center gap-2 text-xs text-ink-4", canFile(d) ? "pr-16" : "pr-8")}>
-                      <span>{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
-                      {d.ownerId !== user.id && (
-                        <span className="inline-flex items-center gap-1">
-                          <Users size={11} /> {d.ownerName ?? d.ownerLogin} · {d.role}
+                    <span className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-ink-3 sm:flex" aria-hidden="true">
+                      <FileText size={17} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span role="heading" aria-level={3} className="truncate text-[15px] font-semibold text-ink">
+                          <Highlight text={d.title} needle={trimmed} />
+                        </span>
+                        {d.starred && <Star size={13} className="shrink-0 text-amber-500 md:hidden" fill="currentColor" aria-label="Starred" />}
+                        <StorageBadge doc={d} />
+                      </span>
+                      {d.snippet ? (
+                        <span className="block truncate text-[13px] text-ink-3" data-testid="search-snippet">
+                          <Highlight text={d.snippet} needle={trimmed} />
+                        </span>
+                      ) : (
+                        <span className="hidden truncate text-[13px] text-ink-3 md:block">{d.excerpt || "Empty document"}</span>
+                      )}
+                      <span className="flex items-center gap-1.5 text-xs text-ink-3 md:hidden">
+                        {folder ? <FolderIcon size={12} className="shrink-0" /> : <Inbox size={12} className="shrink-0" />}
+                        <span className="truncate">{folder?.name ?? "No folder"}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="shrink-0">{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} />}</span>
+                        {d.ownerId !== user.id && <span className="truncate">· {d.ownerName ?? d.ownerLogin}</span>}
+                      </span>
+                    </span>
+                    <span className="hidden w-40 shrink-0 md:block">
+                      {folder && (
+                        <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-xs text-ink-2">
+                          <FolderIcon size={12} className="shrink-0" />
+                          <span className="truncate">{folder.name}</span>
                         </span>
                       )}
-                    </div>
+                    </span>
+                    <span className="hidden w-16 shrink-0 md:block">
+                      <Avatar name={d.ownerName ?? d.ownerLogin ?? "Owner"} size={24} alt={d.ownerId === user.id ? "You" : `Owner ${d.ownerName ?? d.ownerLogin}`} />
+                    </span>
+                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 md:block">
+                      {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} />}
+                    </span>
                   </Link>
-                  <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="absolute bottom-3 right-3" />
-                  {canFile(d) && (
-                    <>
-                      {/* A real checkbox, so the card is selectable from the keyboard and screen readers
-                          read its state. Shown once anything is selected, on hover, or on focus. */}
-                      <label
-                        className={cn(
-                          "tap-target document-selection-target absolute bottom-3 right-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md transition",
-                          "focus-within:opacity-100 group-hover:opacity-100",
-                          selectedIds.has(d.id) ? "opacity-100" : "opacity-0",
-                        )}
+                  <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="hidden shrink-0 md:inline-flex" />
+                  <Menu>
+                    <MenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="tap-target relative inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-ink-3 transition hover:bg-surface-3 hover:text-ink max-md:h-11 max-md:w-11"
+                        aria-label={`Actions for ${d.title}`}
+                        data-testid="document-menu"
+                        data-document-id={d.id}
                       >
-                        <span className="sr-only">Select {d.title}</span>
-                        <input
-                          type="checkbox"
-                          className="m-0 h-6 w-6 cursor-pointer accent-[var(--accent)]"
-                          checked={selectedIds.has(d.id)}
-                          onChange={() => toggleSelected(d.id)}
-                          data-testid="select-document"
-                          data-document-id={d.id}
-                        />
-                      </label>
-                      <Menu>
-                        <MenuTrigger asChild>
-                          <button
-                            type="button"
-                            className="tap-target absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-100 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 sm:opacity-0"
-                            aria-label={`Actions for ${d.title}`}
-                            data-testid="document-menu"
-                            data-document-id={d.id}
-                          >
-                            <MoreVertical size={15} />
-                          </button>
-                        </MenuTrigger>
-                        <MenuContent className="w-52">
-                          {d.role === "owner" && <>
-                            <MenuItem icon={<Share2 size={15} />} onSelect={() => setSharingDocument({ id: d.id, title: d.title })} data-testid="document-share">
-                              Share…
-                            </MenuItem>
-                            <MenuSeparator />
-                          </>}
+                        <MoreHorizontal size={16} />
+                      </button>
+                    </MenuTrigger>
+                    <MenuContent className="w-52">
+                      <MenuItem icon={<FileText size={15} />} onSelect={() => router.push(`/d/${d.id}`)}>
+                        Open
+                      </MenuItem>
+                      {d.role === "owner" && (
+                        <MenuItem icon={<Share2 size={15} />} onSelect={() => setSharingDocument({ id: d.id, title: d.title })} data-testid="document-share">
+                          Share…
+                        </MenuItem>
+                      )}
+                      <MenuItem icon={<Star size={15} />} onSelect={() => toggleStar(d)}>
+                        {d.starred ? "Remove star" : "Star"}
+                      </MenuItem>
+                      {canFile(d) && (
+                        <>
+                          <MenuSeparator />
                           <MoveToItems
                             folders={folders.folders}
                             currentFolderId={d.folderId}
@@ -1870,15 +1903,49 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                           >
                             {deleteBusyIds.has(d.id) ? "Moving to trash…" : "Move to trash"}
                           </MenuItem>
-                        </MenuContent>
-                      </Menu>
-                    </>
-                  )}
+                        </>
+                      )}
+                    </MenuContent>
+                  </Menu>
                 </li>
-              ))}
+                );
+              })}
             </ul>
+            </div>
+
           )}
         </section>
+        </div>
+
+        <button
+          type="button"
+          className="fixed bottom-5 right-4 z-20 inline-flex h-12 items-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90 disabled:opacity-60 md:hidden"
+          style={{ marginBottom: "env(safe-area-inset-bottom, 0px)" }}
+          onClick={() => void create()}
+          disabled={creating !== null}
+          data-testid="new-document-fab"
+        >
+          {creating === CREATE_BLANK_KEY ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />} New
+        </button>
+
+        <Dialog open={drawerOpen} onOpenChange={setDrawerOpen}>
+          <DialogPortal>
+            <DialogOverlay className="dialog-overlay animate-fade-in" />
+            <DialogPrimitiveContent className="drawer overflow-y-auto px-3 py-4 md:hidden" aria-describedby={undefined} data-testid="library-drawer">
+              <DialogTitle className="sr-only">Library</DialogTitle>
+              <div className="mb-3 flex items-center justify-between px-1">
+                <span className="flex items-center gap-2.5">
+                  <Logo className="h-8 w-8" />
+                  <span className="wordmark text-lg font-semibold text-ink">Markdoc</span>
+                </span>
+                <button type="button" className="icon-btn tap-target relative h-9 w-9" onClick={() => setDrawerOpen(false)} aria-label="Close library">
+                  <X size={18} />
+                </button>
+              </div>
+              {renderSidebar(() => setDrawerOpen(false))}
+            </DialogPrimitiveContent>
+          </DialogPortal>
+        </Dialog>
 
         <Dialog open={openPicker} onOpenChange={setOpenPicker}>
           <DialogContent title="Open from GitHub" description="Pick a Markdown file. Markdoc keeps a live copy and publishes back when you ask it to." wide>

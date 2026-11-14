@@ -33,30 +33,21 @@ test.describe("dashboard organisation", () => {
     await user.context.close();
   });
 
-  test("starring a card shows it in the Starred strip and under the Starred chip; unstarring from the editor header removes it", async () => {
+  test("starring a card shows it under the Starred view; unstarring from the editor header removes it", async () => {
     const page = user.page;
-    await expect(page.getByTestId("starred-strip")).toHaveCount(0);
 
     const card = page.getByTestId("document-card").filter({ hasText: "Mike" });
-    await card.hover();
     const toggle = card.locator("..").getByTestId("star-toggle");
     await toggle.click();
     await expect(toggle).toHaveAttribute("data-starred", "true");
 
-    const strip = page.getByTestId("starred-strip");
-    await expect(strip).toBeVisible();
-    await expect(strip.getByTestId("starred-card")).toHaveCount(1);
-    await expect(strip.getByTestId("starred-card")).toContainText("Mike");
-
     await page.getByTestId("filter-starred").click();
     await expect(page.getByTestId("document-card")).toHaveCount(1);
     await expect(page.getByTestId("document-card")).toContainText("Mike");
-    await expect(page.getByTestId("starred-strip")).toHaveCount(0);
     await page.getByTestId("filter-all").click();
 
     // Survives a reload (persisted on the server).
     await goHome(page);
-    await expect(page.getByTestId("starred-strip").getByTestId("starred-card")).toContainText("Mike");
 
     // Unstar from the editor header. The star state is fetched after the first sync (#118), so it must
     // show within 3 s of "saved" (openDocument waited for it).
@@ -67,7 +58,6 @@ test.describe("dashboard organisation", () => {
     await expect(headerStar).toHaveAttribute("data-starred", "false");
 
     await goHome(page);
-    await expect(page.getByTestId("starred-strip")).toHaveCount(0);
     await page.getByTestId("filter-starred").click();
     await expect(page.getByTestId("document-card")).toHaveCount(0);
     await expect(page.getByTestId("empty-state")).toContainText("No starred documents");
@@ -120,7 +110,7 @@ test.describe("dashboard organisation", () => {
         let firstSeen = 0;
         const tick = () => {
           const select = document.querySelector<HTMLSelectElement>('[data-testid="sort-select"]');
-          const titles = Array.from(document.querySelectorAll('[data-testid="document-card"] h3'), (h) => h.textContent?.trim() ?? "");
+          const titles = Array.from(document.querySelectorAll('[data-testid="document-card"] [role="heading"]'), (h) => h.textContent?.trim() ?? "");
           if (select && titles.length) {
             firstSeen ||= performance.now();
             const snapshot = `${select.value}:${titles.join("|")}`;
@@ -137,7 +127,7 @@ test.describe("dashboard organisation", () => {
       const selectHtml = html.slice(html.indexOf('data-testid="sort-select"'), html.indexOf("</select>"));
       expect(selectHtml).toMatch(/<option[^>]*\bselected\b[^>]*value="title"|<option[^>]*value="title"[^>]*\bselected\b/);
       const firstCard = html.slice(html.indexOf('data-testid="document-card"'));
-      expect(firstCard.match(/<h3[^>]*>(.*?)<\/h3>/)?.[1]).toBe("Alpha");
+      expect(firstCard.match(/<span[^>]*role="heading"[^>]*>(.*?)<\/span>/)?.[1]).toBe("Alpha");
 
       const result = await page.waitForFunction(() => (window as unknown as { __sortSamples?: unknown }).__sortSamples, null, { timeout: 30_000 });
       const { samples } = (await result.jsonValue()) as { samples: string[] };
