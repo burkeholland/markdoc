@@ -213,8 +213,7 @@ async function seedDashboard(page: Page) {
   expect((await page.request.delete(`/api/documents/${c}`)).ok()).toBeTruthy();
   await page.goto("/");
   await expect(page.getByTestId("document-card").first()).toBeVisible();
-  await expect(page.getByTestId("starred-strip")).toBeVisible();
-  await expect(page.getByTestId("filter-trash")).toBeVisible();
+  await expect(page.getByTestId("library-sidebar").or(page.getByTestId("library-toggle")).filter({ visible: true }).first()).toBeVisible();
 }
 
 const READER_SCROLL_REGIONS = ".reader-body pre, .reader-body table";
@@ -1257,28 +1256,19 @@ test.describe("axe: phone (iPhone 13)", () => {
     await page.goto("/");
     // Server markup carries no handlers: the tap below is this page's first interaction.
     await waitForHydration(page);
-    const showAll = page.getByTestId("show-all-starred");
+    const showAll = page.getByTestId("library-toggle");
     await expect(showAll).toBeVisible();
     const box = await showAll.boundingBox();
-    expect(box, "show-all-starred bounding box").not.toBeNull();
+    expect(box, "library-toggle bounding box").not.toBeNull();
     expect(cssPx(box!.height)).toBeGreaterThanOrEqual(44);
     expect(cssPx(box!.width)).toBeGreaterThanOrEqual(44);
     await scan(page, "phone dashboard", { targetSize: true, landmarks: true });
-    const select = page.getByTestId("select-document").first();
-    const selectBox = (await select.boundingBox())!;
-    expect(cssPx(selectBox.width), "selection checkbox ≥ 24 px (#2398)").toBeGreaterThanOrEqual(24);
-
-    // Desktop keeps a ≥ 24 px target (WCAG 2.2 minimum) without the phone padding.
-    await page.setViewportSize({ width: 1280, height: 900 });
-    const desktopBox = await showAll.boundingBox();
-    expect(cssPx(desktopBox!.height)).toBeGreaterThanOrEqual(24);
-    await page.setViewportSize(devices["iPhone 13"].viewport);
-    expect(cssPx((await showAll.boundingBox())!.height)).toBeGreaterThanOrEqual(44);
-
-    // Tapping it filters to the starred documents.
+    // The drawer opens from the hamburger and holds the library views.
     await showAll.tap();
-    await expect(page.getByTestId("document-card")).toHaveCount(7);
-    await expect(page.getByTestId("starred-strip")).toHaveCount(0);
+    await expect(page.getByTestId("library-drawer")).toBeVisible();
+    await expect(page.getByTestId("library-drawer").getByTestId("filter-starred")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("library-drawer")).toHaveCount(0);
 
     const id = await createDocument(page, DOC, "Phone fixture");
     await page.goto(`/d/${id}`);

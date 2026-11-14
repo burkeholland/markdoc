@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, Folder, FolderPlus, MoreVertical, Pencil, Share2, Trash2, Users, X } from "lucide-react";
+import { Check, Folder, FolderPlus, Inbox, MoreVertical, Pencil, Share2, Trash2, Users, X } from "lucide-react";
 import { ApiError, api, apiErrorText, type CollaboratorDto, type FolderDto } from "@/lib/api";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
@@ -189,19 +189,20 @@ function sameFolders(a: readonly FolderDto[], b: readonly FolderDto[]): boolean 
 }
 
 /** True when the two selections mean the same thing (`TOP_LEVEL` is a symbol, so `===` is enough). */
-function sameSelection(a: FolderSelection, b: FolderSelection): boolean {
+function sameSelection(a: FolderSelection | undefined, b: FolderSelection): boolean {
   return a === b;
 }
 
-const CHIP_CLASS =
-  "tap-target relative inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition focus-visible:border-accent";
+/** One row of the library sidebar: a full-width button with an icon, a name and a count. */
+export const SIDEBAR_ROW_CLASS =
+  "relative flex min-h-11 w-full min-w-0 items-center gap-2.5 rounded-lg border border-transparent px-3 text-left text-sm transition focus-visible:border-accent md:min-h-9";
 
-function chipClass(selected: boolean, dropActive: boolean): string {
+export function sidebarRowClass(selected: boolean, dropActive = false): string {
   return cn(
-    CHIP_CLASS,
-    selected ? "border-accent bg-accent-soft text-accent" : "border-line bg-surface text-ink-2 hover:border-accent hover:text-ink",
+    SIDEBAR_ROW_CLASS,
+    selected ? "bg-accent-soft font-medium text-accent" : "text-ink-2 hover:bg-surface-2 hover:text-ink",
     // The drop highlight has to beat the selected styling, or dragging onto the open folder looks dead.
-    dropActive && "border-accent border-dashed bg-accent-soft text-accent",
+    dropActive && "border-dashed border-accent bg-accent-soft text-accent",
   );
 }
 
@@ -209,21 +210,28 @@ export interface FolderRailProps {
   state: FoldersState;
   /** How many documents the person owns and has not filed, for the "Not in a folder" count. */
   unfiledCount: number;
-  /** Total documents in the browsing list, for the "All documents" count. */
-  totalCount: number;
+  /** False while a nav view (Starred, Shared with me, Trash) is open, so no folder shows as current. */
+  folderViewActive: boolean;
+  /** Runs after a folder is picked, so the mobile drawer can close. */
+  onNavigate?: () => void;
   /** Move documents into a folder (or to the top level for `null`). Resolves once the move has landed. */
   onDropDocuments: (documentIds: string[], folderId: string | null) => Promise<void>;
 }
 
 /**
- * The folder row above the document list: "All documents", "Not in a folder", then each folder, then
- * "New folder". Every folder chip is also a drop target for dragged cards.
+ * The folders section of the library sidebar: "Not in a folder", then each folder (flat), with a "+"
+ * to add one. Every row is also a drop target for dragged documents.
  *
- * Each chip is a real button, so the row is keyboard-operable with Tab and Enter, and the per-folder
+ * Each row is a real button, so the list is keyboard-operable with Tab and Enter, and the per-folder
  * menu is a Radix dropdown — arrow keys and Enter, no custom key handling (#2377).
  */
-export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }: FolderRailProps) {
-  const { folders, selection, select } = state;
+export function FolderRail({ state, unfiledCount, folderViewActive, onNavigate, onDropDocuments }: FolderRailProps) {
+  const { folders, select: selectFolder } = state;
+  const selection = folderViewActive ? state.selection : undefined;
+  const select = (next: FolderSelection) => {
+    selectFolder(next);
+    onNavigate?.();
+  };
   const ownedFolders = folders.filter((folder) => folder.role === "owner");
   const sharedFolders = folders.filter((folder) => folder.role !== "owner");
   const [naming, setNaming] = React.useState<{ mode: "create" } | { mode: "rename"; folder: FolderDto } | null>(null);
@@ -263,54 +271,57 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
   };
 
   return (
-    <div className="mb-4" data-testid="folder-rail">
-      <div className="folder-rail-chips flex flex-wrap items-center gap-2" role="group" aria-label="Folders">
+    <div data-testid="folder-rail" role="group" aria-labelledby="folders-heading">
+      <div className="mb-1 flex items-center justify-between pl-3 pr-1 pt-5">
+        <h2 id="folders-heading" className="text-[11px] font-semibold uppercase tracking-wider text-ink-4">Folders</h2>
         <button
           type="button"
-          className={chipClass(sameSelection(selection, null), false)}
-          onClick={() => select(null)}
-          aria-pressed={sameSelection(selection, null)}
-          data-testid="folder-all"
+          className="icon-btn tap-target relative h-8 w-8 max-md:h-11 max-md:w-11"
+          onClick={() => setNaming({ mode: "create" })}
+          aria-label="New folder"
+          title="New folder"
+          data-testid="new-folder"
         >
-          All documents <span className="text-ink-4">{totalCount}</span>
+          <FolderPlus size={15} />
         </button>
+      </div>
+      <div className="flex flex-col gap-0.5">
         <button
           type="button"
-          className={chipClass(sameSelection(selection, TOP_LEVEL), dropTarget === TOP_LEVEL)}
+          className={sidebarRowClass(sameSelection(selection, TOP_LEVEL), dropTarget === TOP_LEVEL)}
           onClick={() => select(TOP_LEVEL)}
-          aria-pressed={sameSelection(selection, TOP_LEVEL)}
+          aria-current={sameSelection(selection, TOP_LEVEL) ? "page" : undefined}
           data-testid="folder-unfiled"
           {...dropProps(TOP_LEVEL)}
         >
-          Not in a folder <span className="text-ink-4">{unfiledCount}</span>
+          <Inbox size={16} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate">Not in a folder</span>
+          <span className="text-xs text-ink-4">{unfiledCount}</span>
         </button>
         {ownedFolders.map((folder) => (
-          <span key={folder.id} className="folder-split inline-flex shrink-0 items-center">
+          <span key={folder.id} className="group/folder relative block">
             <button
               type="button"
-              className={cn(chipClass(sameSelection(selection, folder.id), dropTarget === folder.id), "rounded-r-none border-r-0 pr-2")}
+              className={cn(sidebarRowClass(sameSelection(selection, folder.id), dropTarget === folder.id), "pr-10")}
               onClick={() => select(folder.id)}
-              aria-pressed={sameSelection(selection, folder.id)}
+              aria-current={sameSelection(selection, folder.id) ? "page" : undefined}
               data-testid="folder-chip"
               data-folder-id={folder.id}
               {...dropProps(folder.id)}
             >
-              <Folder size={13} className="shrink-0" />
-              <span className="max-w-40 truncate">{folder.name}</span>
-              <span className="text-ink-4">{folder.documentCount}</span>
+              <Folder size={16} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+              <span className="text-xs text-ink-4 transition group-focus-within/folder:opacity-0 group-hover/folder:opacity-0 max-md:opacity-0">{folder.documentCount}</span>
             </button>
             <Menu>
               <MenuTrigger asChild>
                 <button
                   type="button"
-                  className={cn(
-                    chipClass(sameSelection(selection, folder.id), dropTarget === folder.id),
-                    "folder-split-menu rounded-l-none px-1.5",
-                  )}
+                  className="icon-btn tap-target absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 max-md:h-11 max-md:w-11 opacity-0 focus-visible:opacity-100 group-hover/folder:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100"
                   aria-label={`Actions for ${folder.name}`}
                   data-testid="folder-menu"
                 >
-                  <MoreVertical size={13} />
+                  <MoreVertical size={14} />
                 </button>
               </MenuTrigger>
               <MenuContent className="w-44">
@@ -332,33 +343,25 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
         ))}
         {sharedFolders.length > 0 && (
           <>
-            <span className="px-1 text-[11px] font-medium text-ink-4">Shared with me</span>
+            <span className="px-3 pb-0.5 pt-3 text-[11px] font-medium text-ink-4">Shared with me</span>
             {sharedFolders.map((folder) => (
               <button
                 key={folder.id}
                 type="button"
-                className={chipClass(sameSelection(selection, folder.id), false)}
+                className={sidebarRowClass(sameSelection(selection, folder.id))}
                 onClick={() => select(folder.id)}
-                aria-pressed={sameSelection(selection, folder.id)}
+                aria-current={sameSelection(selection, folder.id) ? "page" : undefined}
                 title={`Shared by ${folder.ownerLogin ? `@${folder.ownerLogin}` : folder.ownerName ?? "another person"} · ${folder.role}`}
                 data-testid="shared-folder-chip"
                 data-folder-id={folder.id}
               >
-                <Users size={13} className="shrink-0" />
-                <span className="max-w-40 truncate">{folder.name}</span>
-                <span className="text-ink-4">{folder.documentCount}</span>
+                <Users size={16} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                <span className="text-xs text-ink-4">{folder.documentCount}</span>
               </button>
             ))}
           </>
         )}
-        <button
-          type="button"
-          className={cn(CHIP_CLASS, "border-dashed border-line-2 text-ink-3 hover:border-accent hover:text-accent")}
-          onClick={() => setNaming({ mode: "create" })}
-          data-testid="new-folder"
-        >
-          <FolderPlus size={13} /> New folder
-        </button>
       </div>
 
       <NameDialog
@@ -897,27 +900,27 @@ export function SelectionBar({
 }) {
   return (
     <div
-      className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-accent bg-accent-soft px-3 py-2"
+      className="fixed inset-x-3 bottom-4 z-30 mx-auto flex w-fit max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2 rounded-2xl bg-inverse py-1.5 pl-4 pr-1.5 text-white shadow-xl safe-bottom"
       role="status"
       data-testid="selection-bar"
     >
-      <span className="text-sm font-medium text-accent">
-        {count} document{count === 1 ? "" : "s"} selected
+      <span className="text-sm font-medium">
+        {count} selected
       </span>
-      <div className="ml-auto flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <Menu>
           <MenuTrigger asChild>
-            <button type="button" className="btn btn-sm btn-primary" disabled={busy} data-testid="selection-move">
+            <button type="button" className="inline-flex min-h-11 items-center gap-1.5 rounded-xl px-3 text-sm font-medium hover:bg-white/15 disabled:opacity-50 md:min-h-9" disabled={busy} data-testid="selection-move">
               <Folder size={14} /> Move to…
             </button>
           </MenuTrigger>
-          <MenuContent className="w-52">
+          <MenuContent className="w-52" side="top">
             {/* A selection may span folders, so `undefined`: nothing is ticked and every row stays offered. */}
             <MoveToItems folders={folders} currentFolderId={undefined} onMove={onMove} />
           </MenuContent>
         </Menu>
-        <button type="button" className="btn btn-sm btn-outline" onClick={onClear} data-testid="selection-clear">
-          <X size={14} /> Clear
+        <button type="button" className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-xl px-3 text-sm hover:bg-white/15 md:min-h-9 md:min-w-9" onClick={onClear} aria-label="Clear selection" data-testid="selection-clear">
+          <X size={14} />
         </button>
       </div>
     </div>
