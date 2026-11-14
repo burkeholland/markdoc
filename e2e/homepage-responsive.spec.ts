@@ -1,4 +1,5 @@
 import { test, expect } from "./fixtures";
+import { cssPx } from "./helpers";
 
 test("homepage exposes its header as a banner landmark separate from main", async ({ page }) => {
   await page.goto("/");
@@ -7,6 +8,22 @@ test("homepage exposes its header as a banner landmark separate from main", asyn
   await expect(page.getByRole("main")).toHaveCount(1);
   await expect(page.getByRole("banner").locator('a[href="/login"]')).toBeVisible();
 });
+
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 320, height: 568 },
+]) {
+  test(`homepage header sign-in target is at least 44px tall at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+
+    const signIn = page.locator('header.app-header a[href="/login"]');
+    await expect(signIn).toBeVisible();
+    const box = await signIn.boundingBox();
+    expect(box).not.toBeNull();
+    expect(cssPx(box!.height)).toBeGreaterThanOrEqual(44);
+  });
+}
 
 test("homepage sign-in action stays on one line beside the wordmark at 320px", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 });

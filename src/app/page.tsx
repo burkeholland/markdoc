@@ -49,7 +49,7 @@ function Landing() {
     <div className="min-h-screen bg-surface-2">
       <header className="app-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Wordmark />
-        <Link href="/login" className="btn btn-primary gap-2">
+        <Link href="/login" className="btn btn-primary h-11 gap-2">
           <GitHubIcon size={16} />
           <span className="sm:hidden">Sign in</span>
           <span className="hidden sm:inline">Sign in with GitHub</span>
