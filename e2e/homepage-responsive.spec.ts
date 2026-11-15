@@ -25,6 +25,23 @@ for (const viewport of [
   });
 }
 
+for (const viewport of [
+  { width: 720, height: 430 },
+  { width: 600, height: 400 },
+  { width: 844, height: 390 },
+]) {
+  test(`homepage primary CTA fits in the ${viewport.width}x${viewport.height} viewport`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+
+    const getStarted = page.locator('main a[href="/login"]').first();
+    await expect(getStarted).toBeVisible();
+    const box = await getStarted.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.y + box!.height, "primary CTA bottom stays within the viewport").toBeLessThanOrEqual(viewport.height);
+  });
+}
+
 test("homepage sign-in action stays on one line beside the wordmark at 320px", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 });
   await page.goto("/");
