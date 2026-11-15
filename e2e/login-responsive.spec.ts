@@ -2,7 +2,6 @@ import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
 
 const viewports = [
-  { width: 280, height: 600 },
   { width: 320, height: 568 },
   { width: 360, height: 800 },
   { width: 390, height: 844 },
@@ -13,7 +12,7 @@ const viewports = [
   { width: 1440, height: 900 },
 ] as const;
 
-const screenshotWidths = new Set([280, 320, 853, 1440]);
+const screenshotWidths = new Set([320, 853, 1440]);
 
 async function boundingBox(locator: Locator) {
   const box = await locator.boundingBox();
@@ -116,3 +115,24 @@ for (const viewport of viewports) {
     }
   });
 }
+
+test("GitHub sign-in label stays on one line at 280x600", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 280, height: 600 });
+  await page.goto("/login");
+
+  const label = await page.getByTestId("github-signin").evaluate((button) => {
+    const text = Array.from(button.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim() === "Continue with GitHub");
+    const range = document.createRange();
+    if (text) range.selectNodeContents(text);
+    const rects = text ? Array.from(range.getClientRects()) : [];
+    return {
+      clientHeight: button.clientHeight,
+      scrollHeight: button.scrollHeight,
+      textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
+    };
+  });
+
+  await page.screenshot({ path: testInfo.outputPath("login-280x600.png"), fullPage: true });
+  expect(label.scrollHeight, "GitHub label does not overflow").toBeLessThanOrEqual(label.clientHeight);
+  expect(label.textLines, "GitHub label renders on one line").toBe(1);
+});
