@@ -2,6 +2,7 @@ import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
 
 const viewports = [
+  { width: 280, height: 600 },
   { width: 320, height: 568 },
   { width: 360, height: 800 },
   { width: 390, height: 844 },
@@ -12,7 +13,7 @@ const viewports = [
   { width: 1440, height: 900 },
 ] as const;
 
-const screenshotWidths = new Set([320, 853, 1440]);
+const screenshotWidths = new Set([280, 320, 853, 1440]);
 
 async function boundingBox(locator: Locator) {
   const box = await locator.boundingBox();
@@ -75,11 +76,26 @@ for (const viewport of viewports) {
         textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
       };
     });
+    const githubText = await page.getByTestId("github-signin").evaluate((button) => {
+      const text = Array.from(button.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim() === "Continue with GitHub");
+      const range = document.createRange();
+      if (text) range.selectNodeContents(text);
+      const rects = text ? Array.from(range.getClientRects()) : [];
+      return {
+        clientHeight: button.clientHeight,
+        scrollHeight: button.scrollHeight,
+        textRects: rects.length,
+        textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
+      };
+    });
 
     expect(submitText.scrollHeight, "submit label does not overflow").toBeLessThanOrEqual(submitText.clientHeight);
     expect(submitText.textRects, "submit label renders in one client rect").toBe(1);
     expect(submitText.textLines, "submit label renders on one line").toBe(1);
     expect(submit.height, "submit height").toBeLessThanOrEqual(44);
+    expect(githubText.scrollHeight, "GitHub label does not overflow").toBeLessThanOrEqual(githubText.clientHeight);
+    expect(githubText.textRects, "GitHub label renders in one client rect").toBe(1);
+    expect(githubText.textLines, "GitHub label renders on one line").toBe(1);
 
     if (viewport.width >= 640) {
       expect(Math.abs(input.y - submit.y), "desktop control top edges").toBeLessThanOrEqual(2);
