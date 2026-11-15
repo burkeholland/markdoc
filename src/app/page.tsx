@@ -47,7 +47,7 @@ function Feature({ icon, title, children }: { icon: React.ReactNode; title: stri
 function Landing() {
   return (
     <div className="min-h-screen bg-surface-2">
-      <header className="app-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
+      <header className="app-header landing-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Wordmark />
         <Link href="/login" className="btn btn-primary h-11 gap-2">
           <GitHubIcon size={16} />
@@ -56,15 +56,15 @@ function Landing() {
         </Link>
       </header>
       <main>
-        <section className="mx-auto max-w-6xl px-6 pb-16 pt-12">
+        <section className="landing-hero mx-auto max-w-6xl px-6 pb-16 pt-12">
           <div className="max-w-2xl">
-            <h1 className="hero-title text-4xl font-bold leading-tight tracking-tight text-ink sm:text-5xl">Markdown, together.</h1>
-            <p className="mt-3 text-xl leading-8 text-ink-2">A shared editor for Markdown — source and preview side by side, live for everyone.</p>
-            <p className="mt-5 text-lg leading-8 text-ink-3">
+            <h1 className="hero-title landing-title text-4xl font-bold leading-tight tracking-tight text-ink sm:text-5xl">Markdown, together.</h1>
+            <p className="landing-summary mt-3 text-xl leading-8 text-ink-2">A shared editor for Markdown — source and preview side by side, live for everyone.</p>
+            <p className="landing-detail mt-5 text-lg leading-8 text-ink-3">
               Edit the source or the rendered page; both update for everyone at once. Review with comments and suggestions, keep every version, and publish
               straight to a gist or a repository.
             </p>
-            <div className="mt-8 flex flex-wrap items-center gap-3">
+            <div className="landing-actions mt-8 flex flex-wrap items-center gap-3">
               <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
                 Get started <ArrowRight size={18} />
               </Link>
