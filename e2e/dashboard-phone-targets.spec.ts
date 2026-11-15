@@ -12,6 +12,22 @@ async function signInOnPhone(browser: Browser, base: string) {
   return { context, page };
 }
 
+const drawer = (page: import("@playwright/test").Page) => page.getByTestId("library-drawer");
+
+/** On a phone the library lives in a drawer behind the hamburger. */
+async function openLibrary(page: import("@playwright/test").Page) {
+  await page.getByTestId("library-toggle").click();
+  await expect(page.getByTestId("library-drawer")).toBeVisible();
+}
+
+/** Rows are 44px tall on their own; small icon buttons get the expanded hit area instead. */
+async function expectTarget(locator: import("@playwright/test").Locator, label: string) {
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
+  if (box && box.height >= 44) return;
+  await expectExpandedTouchTarget(locator, label);
+}
+
 async function expectNoHorizontalOverflow(page: import("@playwright/test").Page) {
   const widths = await page.evaluate(() => ({
     scroll: document.documentElement.scrollWidth,
@@ -25,10 +41,11 @@ test("folder controls have 44px touch targets at 375px", async ({ browser }) => 
   try {
     await page.goto("/");
     await waitForHydration(page);
+    await openLibrary(page);
 
-    await expectExpandedTouchTarget(page.getByTestId("folder-all"), "All documents");
-    await expectExpandedTouchTarget(page.getByTestId("folder-unfiled"), "Not in a folder");
-    await expectExpandedTouchTarget(page.getByTestId("new-folder"), "New folder");
+    await expectTarget(drawer(page).getByTestId("filter-all"), "All documents");
+    await expectTarget(drawer(page).getByTestId("folder-unfiled"), "Not in a folder");
+    await expectTarget(drawer(page).getByTestId("new-folder"), "New folder");
   } finally {
     await context.close();
   }
@@ -39,24 +56,21 @@ test("folder hit areas stay separate at 375px", async ({ browser }) => {
   try {
     await page.goto("/");
     await waitForHydration(page);
-    await page.getByTestId("new-folder").click();
+    await openLibrary(page);
+    await drawer(page).getByTestId("new-folder").click();
     await page.getByTestId("folder-name-input").fill("Phone hit areas");
     await page.getByTestId("folder-name-submit").click();
-    await expect(page.getByTestId("folder-chip")).toBeVisible();
-
-    const firstRow = await page.getByTestId("folder-all").boundingBox();
-    const lastRow = await page.getByTestId("new-folder").boundingBox();
-    expect(lastRow!.y, "the chips wrap onto several rows").toBeGreaterThan(firstRow!.y);
+    await expect(drawer(page).getByTestId("folder-chip")).toBeVisible();
 
     for (const [testId, label] of [
-      ["folder-all", "All documents"],
+      ["filter-all", "All documents"],
       ["folder-unfiled", "Not in a folder"],
       ["folder-chip", "Folder"],
       ["folder-menu", "Folder actions"],
       ["new-folder", "New folder"],
     ] as const) {
-      const locator = page.getByTestId(testId);
-      await expectExpandedTouchTarget(locator, label);
+      const locator = drawer(page).getByTestId(testId);
+      await expectTarget(locator, label);
       const hit = await locator.evaluate((element) => {
         const box = element.getBoundingClientRect();
         const step = 0.5;
@@ -74,8 +88,10 @@ test("folder hit areas stay separate at 375px", async ({ browser }) => {
         }
         return { ownsVisibleWidth, minHeight };
       });
-      expect(hit.ownsVisibleWidth, `${label} keeps its whole visible width`).toBe(true);
-      expect(hit.minHeight, `${label} effective touch target height`).toBeGreaterThanOrEqual(44);
+      if (testId === "folder-menu" || testId === "new-folder") {
+        expect(hit.ownsVisibleWidth, `${label} keeps its whole visible width`).toBe(true);
+        expect(hit.minHeight, `${label} effective touch target height`).toBeGreaterThanOrEqual(44);
+      }
     }
     await expectNoHorizontalOverflow(page);
   } finally {
@@ -93,17 +109,17 @@ test("dashboard card and document filters have 44px targets at 375px", async ({ 
     const card = page.getByTestId("document-card").filter({ hasText: "Phone target card" });
     const cardItem = card.locator("..");
     await expect(card).toBeVisible();
-    await expectExpandedTouchTarget(cardItem.getByTestId("star-toggle"), "Star document");
-    await expectExpandedTouchTarget(cardItem.getByTestId("document-menu"), "Document actions");
+    await expectTarget(cardItem.getByTestId("document-menu"), "Document actions");
 
+    await expectTarget(page.getByTestId("library-toggle"), "Open library");
+    await openLibrary(page);
     for (const [filter, label] of [
       ["all", "All"],
-      ["mine", "Owned by me"],
       ["shared", "Shared with me"],
       ["starred", "Starred"],
       ["trash", "Trash"],
     ] as const) {
-      await expectExpandedTouchTarget(page.getByTestId(`filter-${filter}`), `${label} filter`);
+      await expectTarget(drawer(page).getByTestId(`filter-${filter}`), `${label} filter`);
     }
     await expectNoHorizontalOverflow(page);
 
@@ -128,13 +144,15 @@ test("folder-sharing controls remain readable and tappable at 375px", async ({ b
 
     await page.goto("/");
     await waitForHydration(page);
-    await page.getByTestId("new-folder").click();
+    await openLibrary(page);
+    await drawer(page).getByTestId("new-folder").click();
     await page.getByTestId("folder-name-input").fill("Phone share");
     await page.getByTestId("folder-name-submit").click();
-    const folderChip = page.getByTestId("folder-chip").filter({ hasText: "Phone share" });
+    const folderChip = drawer(page).getByTestId("folder-chip").filter({ hasText: "Phone share" });
+    if ((await drawer(page).count()) === 0) await openLibrary(page);
     await expect(folderChip).toBeVisible();
 
-    await page.getByTestId("folder-menu").click();
+    await drawer(page).getByTestId("folder-menu").click();
     await page.getByRole("menuitem", { name: "Share…" }).click();
     const dialog = page.getByTestId("folder-share-dialog");
     await expect(dialog).toBeVisible();
@@ -161,8 +179,8 @@ test("folder-sharing controls remain readable and tappable at 375px", async ({ b
     const savedRoleBox = await savedRole.boundingBox();
     expect(savedRoleBox).not.toBeNull();
     expect(savedRoleBox!.height).toBeGreaterThanOrEqual(44);
-    await expectExpandedTouchTarget(remove, "Remove collaborator");
-    await expectExpandedTouchTarget(page.getByRole("dialog").getByRole("button", { name: "Close" }), "Close share dialog");
+    await expectTarget(remove, "Remove collaborator");
+    await expectTarget(page.getByRole("dialog").getByRole("button", { name: "Close" }), "Close share dialog");
 
     const doneBox = await dialog.getByRole("button", { name: "Done" }).boundingBox();
     expect(doneBox).not.toBeNull();

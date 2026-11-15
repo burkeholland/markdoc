@@ -67,18 +67,15 @@ afterEach(() => cleanup());
 const renderDashboard = () =>
   render(<Dashboard user={USER} documents={[doc("a", "Alpha"), doc("b", "Beta")]} githubAvailable githubConfigured />);
 
-it("filter chips respond to real clicks and arrow keys", async () => {
+it("sidebar views respond to real clicks and keyboard activation", async () => {
   const user = userEvent.setup();
   renderDashboard();
-  await user.click(screen.getByTestId("filter-mine"));
-  expect(screen.getByTestId("filter-mine").getAttribute("aria-pressed")).toBe("true");
-  await user.keyboard("{ArrowRight}");
-  expect(screen.getByTestId("filter-shared")).toHaveFocus();
-  expect(screen.getByTestId("filter-shared").getAttribute("aria-pressed")).toBe("true");
-  await user.keyboard("{End}");
-  expect(screen.getByTestId("filter-trash")).toHaveFocus();
-  await user.keyboard("{ArrowRight}");
-  expect(screen.getByTestId("filter-all")).toHaveFocus();
+  await user.click(screen.getByTestId("filter-shared"));
+  expect(screen.getByTestId("filter-shared")).toHaveAttribute("aria-current", "page");
+  screen.getByTestId("filter-all").focus();
+  await user.keyboard("{Enter}");
+  expect(screen.getByTestId("filter-all")).toHaveAttribute("aria-current", "page");
+  expect(screen.getByTestId("filter-shared")).not.toHaveAttribute("aria-current");
 });
 
 it("restores a trashed document with a real click and moves between trash actions by keyboard", async () => {

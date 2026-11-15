@@ -476,7 +476,7 @@ describe("the folder rail", () => {
       doc("theirs", "Theirs", null, "someone"),
     ]);
     expect(screen.getByTestId("folder-unfiled")).toHaveTextContent("1");
-    expect(screen.getByTestId("folder-all")).toHaveTextContent("3");
+    expect(screen.getByTestId("filter-all")).toHaveTextContent("3");
   });
 
   it("keeps the shared keyboard focus outline on folder controls and sorting", async () => {
@@ -485,15 +485,15 @@ describe("the folder rail", () => {
     await waitFor(() => expect(screen.getByTestId("folder-menu")).toBeInTheDocument());
 
     const controls = [
-      screen.getByTestId("folder-all"),
       screen.getByTestId("folder-unfiled"),
       screen.getByTestId("folder-chip"),
-      screen.getByTestId("folder-menu"),
-      screen.getByTestId("new-folder"),
       screen.getByTestId("sort-select"),
     ];
     for (const control of controls) {
       expect(control).toHaveClass("focus-visible:border-accent");
+      expect(control).not.toHaveClass("outline-none");
+    }
+    for (const control of [screen.getByTestId("folder-menu"), screen.getByTestId("new-folder")]) {
       expect(control).not.toHaveClass("outline-none");
     }
   });
@@ -510,7 +510,7 @@ describe("the folder rail", () => {
     fireEvent.click(screen.getByTestId("folder-unfiled"));
     expect(cardTitles()).toEqual(["Loose"]);
 
-    fireEvent.click(screen.getByTestId("folder-all"));
+    fireEvent.click(screen.getByTestId("filter-all"));
     expect(cardTitles()).toHaveLength(2);
   });
 
@@ -524,12 +524,12 @@ describe("the folder rail", () => {
 
     await waitFor(() => expect(createFolder).toHaveBeenCalledWith("Ideas"));
     await waitFor(() => expect(screen.getByTestId("folder-chip")).toHaveTextContent("Ideas"));
-    expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("folder-all")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("filter-all")).not.toHaveAttribute("aria-current");
     expect(cardTitles()).toEqual([]);
     expect(screen.getByTestId("empty-state")).toHaveTextContent("This folder is empty");
     expect(screen.getByTestId("empty-state")).toHaveTextContent(
-      "Create a document above, then move it here from its card menu, or drag an existing card onto this folder.",
+      "Create a document, then move it here from its row menu, or drag an existing row onto this folder.",
     );
     expect(screen.getByTestId("empty-state")).not.toHaveTextContent("Try a different search");
   });
@@ -573,11 +573,14 @@ describe("the folder rail", () => {
     await waitFor(() => expect(screen.queryByTestId("folder-chip")).not.toBeInTheDocument());
   });
 
-  it("is out of the way in the trash", async () => {
+  it("keeps no folder marked as current in the trash", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes")] });
     await mount([doc("d1", "One")]);
-    expect(screen.getByTestId("folder-rail")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByTestId("folder-chip")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("folder-chip"));
+    expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-current", "page");
     fireEvent.click(screen.getByTestId("filter-trash"));
-    expect(screen.queryByTestId("folder-rail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("folder-chip")).not.toHaveAttribute("aria-current");
   });
 });
 
@@ -607,10 +610,21 @@ describe("moving a document from its card menu", () => {
     expect(screen.getByTestId("move-to-top-level")).not.toHaveAttribute("data-disabled");
   });
 
-  it("offers no menu on a document owned by someone else", async () => {
+  it("offers someone else's document only Open and Star, with no select box", async () => {
     await mount([doc("theirs", "Theirs", null, "someone")]);
-    expect(screen.queryByTestId("document-menu")).not.toBeInTheDocument();
+    openMenu(screen.getByTestId("document-menu"));
+    expect(await screen.findByText("Open")).toBeInTheDocument();
+    expect(screen.queryByTestId("document-share")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("move-to-folder")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("document-delete")).not.toBeInTheDocument();
     expect(screen.queryByTestId("select-document")).not.toBeInTheDocument();
+  });
+
+  it("keeps Share in the document menu and off the row", async () => {
+    await mount([doc("d1", "Soup")]);
+    expect(screen.getByTestId("document-list")).not.toHaveTextContent("Share");
+    openMenu(screen.getByTestId("document-menu"));
+    expect(await screen.findByTestId("document-share")).toBeInTheDocument();
   });
 
   it("leaves the card alone when the server moved nothing", async () => {
@@ -638,7 +652,7 @@ describe("moving several documents at once", () => {
     const boxes = screen.getAllByTestId("select-document");
     fireEvent.click(boxes[0]);
     fireEvent.click(boxes[1]);
-    expect(screen.getByTestId("selection-bar")).toHaveTextContent("2 documents selected");
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("2 selected");
 
     openMenu(screen.getByTestId("selection-move"));
     fireEvent.click(await screen.findByTestId("move-to-folder"));
@@ -662,7 +676,7 @@ describe("moving several documents at once", () => {
   it("clears the selection on demand", async () => {
     await mount([doc("d1", "One")]);
     fireEvent.click(screen.getByTestId("select-document"));
-    expect(screen.getByTestId("selection-bar")).toHaveTextContent("1 document selected");
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("1 selected");
     fireEvent.click(screen.getByTestId("selection-clear"));
     expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
   });

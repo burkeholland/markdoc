@@ -15,7 +15,7 @@ import { signIn, createDocument, uniqueLogin, waitForHydration, type User } from
 async function goHome(page: Page) {
   await page.goto("/");
   await waitForHydration(page);
-  await expect(page.getByTestId("folder-rail")).toBeVisible();
+  await expect(page.getByTestId("library-sidebar")).toBeVisible();
 }
 
 const cardTitles = (page: Page) => page.getByTestId("document-card").getByRole("heading").allInnerTexts();
@@ -29,7 +29,7 @@ async function newFolder(page: Page, name: string) {
   await page.getByTestId("folder-name-submit").click();
   await expect(chip(page, name)).toBeVisible();
   // These specs exercise card actions after folder creation, so restore the all-documents view.
-  await page.getByTestId("folder-all").click();
+  await page.getByTestId("filter-all").click();
 }
 
 /** The card for a document, by its title. */
@@ -105,8 +105,10 @@ test.describe("folders", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("menu")).toBeVisible();
 
-    // The top-level row is disabled because the document is already at the top level, so focus starts
-    // on the first enabled folder row.
+    // Menu items come before the folders, so walk down to the first folder row.
+    for (let i = 0; i < 8 && !(await page.getByTestId("move-to-folder").evaluate((el) => el === document.activeElement)); i++) {
+      await page.keyboard.press("ArrowDown");
+    }
     await expect(page.getByTestId("move-to-folder")).toBeFocused();
     await page.keyboard.press("Enter");
 
@@ -125,7 +127,7 @@ test.describe("folders", () => {
 
     await cardItem(page, "One").getByTestId("select-document").check();
     await cardItem(page, "Two").getByTestId("select-document").check();
-    await expect(page.getByTestId("selection-bar")).toContainText("2 documents selected");
+    await expect(page.getByTestId("selection-bar")).toContainText("2 selected");
 
     await page.getByTestId("selection-move").click();
     await page.getByTestId("move-to-folder").click();
@@ -312,7 +314,7 @@ test.describe("folders", () => {
       const shared = cardItem(page, "Theirs");
       await expect(shared).toBeVisible();
       // A folder belongs to one person, so there is nowhere for a collaborator to file this.
-      await expect(shared.getByTestId("document-menu")).toHaveCount(0);
+      await expect(shared.locator("..").getByTestId("document-share")).toHaveCount(0);
       await expect(shared.getByTestId("select-document")).toHaveCount(0);
       await expect(shared).not.toHaveAttribute("draggable", "true");
     } finally {
