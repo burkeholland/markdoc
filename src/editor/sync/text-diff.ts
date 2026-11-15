@@ -98,15 +98,3 @@ export function diffOpsWords(oldText: string, newText: string, from = 0): TextOp
   return ops;
 }
 
-/**
- * Replace [from, to) of the Y.Text with `newText` using the smallest set of
- * insert/delete operations. Keeping operations minimal preserves relative
- * positions (remote cursors, comment anchors) as much as possible.
- */
-export function replaceRangeMinimal(ytext: Y.Text, from: number, to: number, newText: string, cursor?: number): TextOp[] {
-  const oldText = ytext.toString().slice(from, to);
-  const ops = diffOps(oldText, newText, from, cursor);
-  applyOps(ytext, ops);
-  return ops;
-}
-

@@ -39,17 +39,9 @@ export function textChangeSpan(oldText: string, newText: string): ChangeSpan | n
   return { from: prefix, oldTo: oldEnd - suffix, newTo: newEnd - suffix };
 }
 
-/** Constructs whose meaning depends on text anywhere else in the document (link reference definitions, footnotes). */
-const GLOBAL_CONTEXT = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[[^\]\n]*\]:|\[\^/m;
-
 /** A link reference definition or footnote definition, possibly nested in a blockquote or list item. */
 const DEFINITION = /^[ \t]*(?:(?:>[ \t]?|[-*+][ \t]|\d{1,9}[.)][ \t])[ \t]*)*\[([^\]\n]*)\]:/m;
 const DEFINITIONS = new RegExp(DEFINITION.source, "gm");
-
-/** True when a region cannot be parsed in isolation because of document-wide constructs. */
-export function hasGlobalContext(text: string): boolean {
-  return GLOBAL_CONTEXT.test(text);
-}
 
 /** True when the text defines a link reference or footnote, which changes how the rest of the document reads. */
 export function hasDefinition(text: string): boolean {

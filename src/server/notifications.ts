@@ -161,11 +161,6 @@ export type NotificationItem = NotificationBase & (
 
 export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "suggestion.accepted", "review", "share", "access.request", "request.done", "webhook.disabled"];
 
-/** Wire shape: dates as ISO strings. */
-export function toNotificationDto(n: NotificationItem) {
-  return { ...n, createdAt: n.createdAt.toISOString(), readAt: n.readAt ? n.readAt.toISOString() : null };
-}
-
 export interface NotificationPage {
   items: NotificationItem[];
   unreadCount: number;

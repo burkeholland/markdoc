@@ -634,12 +634,3 @@ export async function pollEvents(docId: string | null, user: SessionUser & { age
 export function parseIncludeSelf(raw: string | null | undefined): boolean {
   return raw !== null && raw !== undefined && ["1", "true", "yes"].includes(raw.trim().toLowerCase());
 }
-
-/** Tests only. */
-export function resetAgentEvents() {
-  seqs.clear();
-  waiters.clear();
-  textCache.clear();
-  writes.clear();
-  typists.clear();
-}

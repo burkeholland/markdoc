@@ -21,8 +21,6 @@ export interface SuggestionBlock {
   warning: string | null;
 }
 
-export type SuggestionState = "pending" | "accepted" | "rejected";
-
 // An empty block (no content line) proposes deleting the quoted text, as on GitHub.
 const FENCE_RE = /(\n)[ \t]{0,3}(`{3,}|~{3,})[ \t]*suggestion[ \t]*\n(?:([\s\S]*?)\n)?[ \t]{0,3}\2[ \t]*(?=\n|$)/g;
 

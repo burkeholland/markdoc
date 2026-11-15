@@ -142,9 +142,6 @@ const noHorizontalScroll = (page: Page) =>
     return el.scrollWidth <= window.innerWidth;
   });
 
-/** Page-level horizontal overflow in CSS px (#1556's census read): 0 when nothing widens the page. */
-const pageOverflowX = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-
 /**
  * A 120-character title and a 200-character first paragraph with no break opportunity at all (letters
  * and digits only — a browser may break after a `/` or `-`, so a pasted URL is the softer case).

@@ -83,11 +83,6 @@ export function findUnrenderable(text: string): UnrenderableReason | null {
   return check();
 }
 
-/** Shorthand for `findUnrenderable(text) === null`. */
-export function isRenderable(text: string): boolean {
-  return findUnrenderable(text) === null;
-}
-
 /** A paragraph (run of non-blank lines, see module doc) that trips the guard. `to` excludes the trailing newline. */
 export interface UnrenderableRange {
   from: number;
