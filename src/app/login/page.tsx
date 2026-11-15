@@ -58,7 +58,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
               await signIn("github", { redirectTo: next });
             }}
           >
-            <button type="submit" className="btn btn-primary h-11 w-full gap-2 text-base" data-testid="github-signin">
+            <button type="submit" className="btn btn-primary h-11 w-full gap-1.5 px-2 text-sm whitespace-nowrap sm:gap-2 sm:px-3.5 sm:text-base" data-testid="github-signin">
               <GitHubIcon size={18} /> Continue with GitHub
             </button>
           </form>
