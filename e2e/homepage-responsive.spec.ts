@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { cssPx } from "./helpers";
+import { cssPx, waitForHydration } from "./helpers";
 
 test("homepage exposes its header as a banner landmark separate from main", async ({ page }) => {
   await page.goto("/");
@@ -86,4 +86,47 @@ test("homepage offers a next step after the features on phones", async ({ page }
   await expect(nextStep).toHaveText("Get started");
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect(nextStep).toBeInViewport();
+});
+
+for (const tabCount of [1, 2, 3]) {
+  test(`browser Back restores homepage sign-in link ${tabCount}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/");
+    await waitForHydration(page);
+    await page.addStyleTag({ content: "nextjs-portal { display: none !important }" });
+
+    const links = page.locator('a[href="/login"]');
+    for (let i = 0; i < tabCount; i++) await page.keyboard.press("Tab");
+    const selected = links.nth(tabCount - 1);
+    await expect(selected).toBeFocused();
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/login");
+    await page.goBack();
+    await expect(selected).toBeFocused();
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
+
+    await page.goForward();
+    await page.waitForURL("**/login");
+    await page.goBack();
+    await expect(selected).toBeFocused();
+    if (tabCount === 3) {
+      await page.keyboard.press("Tab");
+      await expect(links.first()).not.toBeFocused();
+      expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
+    }
+  });
+}
+
+test("a fresh homepage visit does not restore a previous sign-in link", async ({ page }) => {
+  await page.goto("/");
+  await waitForHydration(page);
+  const link = page.locator('main a[href="/login"]').last();
+  await link.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForURL("**/login");
+  await page.getByTestId("login-home").click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator("body")).toBeFocused();
 });
