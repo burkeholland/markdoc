@@ -106,9 +106,11 @@ test.describe("dashboard search", () => {
     await expect(page.getByTestId("search-result")).toHaveCount(1);
     await page.getByRole("button", { name: "Shared with me" }).click();
     await expect(page.getByTestId("empty-state")).toContainText('No matches for "quokka"');
-    await page.getByRole("button", { name: "Owned by me" }).click();
+    await page.getByTestId("filter-all").click();
+    await page.getByTestId("filter-owner").selectOption("mine");
     await expect(page.getByTestId("search-result")).toHaveCount(1);
-    await page.getByRole("button", { name: "All" }).click();
+    await page.getByTestId("filter-owner").selectOption("all");
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
   });
 });
 
@@ -129,6 +131,9 @@ test.describe("dashboard search: real input", () => {
 
   async function freshDashboard(): Promise<Page> {
     const page = searcher.page;
+    await page.evaluate(() => {
+      for (const key of Object.keys(window.sessionStorage)) if (key.startsWith("markdoc:dashboardSearch")) window.sessionStorage.removeItem(key);
+    });
     await page.goto("/");
     await waitForHydration(page);
     await expect(page.getByTestId("document-card")).toHaveCount(2);
