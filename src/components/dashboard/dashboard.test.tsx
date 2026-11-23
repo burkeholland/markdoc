@@ -2070,6 +2070,37 @@ describe("dashboard polish", () => {
       vi.unstubAllGlobals();
     }
   });
+  it("does not swallow the next tap after a long press whose pointer was cancelled", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      renderDashboard();
+      const link = screen.getAllByTestId("document-card")[0];
+      const touch = { pointerType: "touch", bubbles: true } as PointerEventInit;
+
+      fireEvent.pointerDown(link, touch);
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      expect(screen.getAllByTestId("select-document")[0]).toBeChecked();
+      fireEvent.pointerCancel(link, touch);
+
+      // Leave select mode so the next tap is a plain open; the old flag must not eat it.
+      fireEvent.click(screen.getByTestId("select-mode"));
+      expect(fireEvent.click(link)).toBe(true);
+
+      // A long press that ends with a click is still swallowed once, and a new press resets the flag.
+      fireEvent.pointerDown(link, touch);
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      fireEvent.pointerUp(link, touch);
+      expect(fireEvent.click(link)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("dashboard search controls", () => {

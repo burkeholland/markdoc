@@ -1788,6 +1788,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   }}
                   // A long press selects the row on a phone, where there is no hover to reveal the checkbox.
                   onPointerDown={(event) => {
+                    // Every new press starts clean: a long press whose click never came (the browser cancelled the
+                    // pointer) must not swallow this tap.
+                    longPressed.current = null;
                     if (event.pointerType !== "touch" || !canFile(d)) return;
                     // Checkbox labels and buttons own their activation; a long press on them must not toggle twice.
                     if (event.target instanceof Element && event.target.closest("label, button, input")) return;
@@ -1799,7 +1802,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     }, 500);
                   }}
                   onPointerUp={() => window.clearTimeout(longPressTimer.current)}
-                  onPointerCancel={() => window.clearTimeout(longPressTimer.current)}
+                  // No click follows a cancelled pointer, so there is nothing left to swallow.
+                  onPointerCancel={() => {
+                    window.clearTimeout(longPressTimer.current);
+                    longPressed.current = null;
+                  }}
                   onPointerMove={() => window.clearTimeout(longPressTimer.current)}
                   data-selected={selected || undefined}
                 >
