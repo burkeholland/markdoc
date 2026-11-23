@@ -1987,6 +1987,59 @@ describe("dashboard polish", () => {
     expect(emptyState).toHaveTextContent("or open a Markdown file.");
     expect(emptyState).not.toHaveTextContent("GitHub");
   });
+  it("labels the activity column by what it shows, including the recent sort", () => {
+    const seen = { ...doc("seen", "Seen doc"), lastOpenedAt: "2026-09-08T12:00:00.000Z" };
+    const never = doc("never", "Never opened");
+    renderDashboard(undefined, [seen, never]);
+
+    expect(screen.getByText("Last opened", { selector: "span" })).toBeInTheDocument();
+    const rows = screen.getAllByTestId("document-card");
+    expect(within(rows[0]).getAllByText(/Opened /).length).toBeGreaterThan(0);
+    expect(within(rows[1]).getAllByText(/Edited /).length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByTestId("sort-select"), { target: { value: "modified" } });
+
+    expect(screen.getByText("Last edited", { selector: "span" })).toBeInTheDocument();
+    expect(screen.queryByText("Last opened", { selector: "span" })).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("document-list")).queryByText(/Opened /)).not.toBeInTheDocument();
+  });
+
+  it("uses the theme-aware text-on-accent token for the phone New document button", () => {
+    renderDashboard();
+
+    const fab = screen.getByTestId("new-document-fab");
+    expect(fab).toHaveClass("text-on-accent");
+    expect(fab).not.toHaveClass("text-white");
+  });
+
+  it("leaves select mode when the screen widens, so rows open again", () => {
+    let wide = false;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() {
+        return wide;
+      },
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    try {
+      renderDashboard();
+      fireEvent.click(screen.getByTestId("select-mode"));
+      expect(screen.getByTestId("select-mode")).toHaveAttribute("aria-pressed", "true");
+      const link = screen.getAllByTestId("document-card")[0];
+      expect(fireEvent.click(link)).toBe(false);
+
+      act(() => {
+        wide = true;
+        listeners.forEach((listener) => listener());
+      });
+
+      expect(screen.getByTestId("select-mode")).toHaveAttribute("aria-pressed", "false");
+      expect(fireEvent.click(link)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("dashboard search controls", () => {

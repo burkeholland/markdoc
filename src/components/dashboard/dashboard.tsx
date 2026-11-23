@@ -397,6 +397,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     return () => query.removeEventListener("change", closeOnWide);
   }, [drawerOpen]);
   const [selectMode, setSelectMode] = useState(false);
+  // Select mode is a phone-only toggle; left on after the screen widens it would swallow every row click.
+  useEffect(() => {
+    if (!selectMode) return;
+    const query = window.matchMedia("(min-width: 768px)");
+    const leaveOnWide = () => query.matches && setSelectMode(false);
+    leaveOnWide();
+    query.addEventListener("change", leaveOnWide);
+    return () => query.removeEventListener("change", leaveOnWide);
+  }, [selectMode]);
   const longPressTimer = useRef<number | undefined>(undefined);
   const longPressed = useRef<string | null>(null);
   const [searchMount] = useState(() => Symbol("dashboard-search"));
@@ -1756,7 +1765,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 <span className="min-w-0 flex-1">Name</span>
                 <span className="w-40 shrink-0">Folder</span>
                 <span className="w-16 shrink-0">Owner</span>
-                <span className="w-24 shrink-0">Last edited</span>
+                <span className="w-24 shrink-0">{sort === "recent" ? "Last opened" : "Last edited"}</span>
               </div>
             <ul ref={searchResultListRef} className="divide-y divide-line" data-testid="document-list">
               {filtered.map((d) => {
@@ -1850,7 +1859,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         {folder ? <FolderIcon size={12} className="shrink-0" /> : <Inbox size={12} className="shrink-0" />}
                         <span className="truncate">{folder?.name ?? "No folder"}</span>
                         <span aria-hidden="true">·</span>
-                        <span className="shrink-0">{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} />}</span>
+                        <span className="shrink-0">{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix={sort === "recent" ? "Edited " : undefined} />}</span>
                         {d.ownerId !== user.id && <span className="truncate">· {d.ownerName ?? d.ownerLogin}</span>}
                       </span>
                     </span>
@@ -1866,7 +1875,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       <Avatar name={d.ownerName ?? d.ownerLogin ?? "Owner"} size={24} alt={d.ownerId === user.id ? "You" : `Owner ${d.ownerName ?? d.ownerLogin}`} />
                     </span>
                     <span className="hidden w-24 shrink-0 text-xs text-ink-3 lg:block">
-                      {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} />}
+                      {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix={sort === "recent" ? "Edited " : undefined} />}
                     </span>
                   </Link>
                   <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="hidden shrink-0 md:inline-flex" />
@@ -1929,7 +1938,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
         <button
           type="button"
-          className="fixed bottom-5 right-4 z-20 inline-flex h-12 items-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white shadow-lg transition hover:opacity-90 disabled:opacity-60 md:hidden"
+          className="fixed bottom-5 right-4 z-20 inline-flex h-12 items-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-on-accent shadow-lg transition hover:opacity-90 disabled:opacity-60 md:hidden"
           style={{ marginBottom: "env(safe-area-inset-bottom, 0px)" }}
           onClick={() => void create()}
           disabled={creating !== null}
