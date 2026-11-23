@@ -1789,6 +1789,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   // A long press selects the row on a phone, where there is no hover to reveal the checkbox.
                   onPointerDown={(event) => {
                     if (event.pointerType !== "touch" || !canFile(d)) return;
+                    // Checkbox labels and buttons own their activation; a long press on them must not toggle twice.
+                    if (event.target instanceof Element && event.target.closest("label, button, input")) return;
                     window.clearTimeout(longPressTimer.current);
                     longPressTimer.current = window.setTimeout(() => {
                       longPressed.current = d.id;

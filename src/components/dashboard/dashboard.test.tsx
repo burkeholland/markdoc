@@ -2040,6 +2040,36 @@ describe("dashboard polish", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("does not start a long-press selection from a checkbox label or button", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      renderDashboard();
+      const checkbox = screen.getAllByTestId("select-document")[0];
+      const row = checkbox.closest("li") as HTMLElement;
+      const touch = { pointerType: "touch", bubbles: true } as PointerEventInit;
+      const press = (target: Element) => {
+        fireEvent.pointerDown(target, touch);
+        act(() => {
+          vi.advanceTimersByTime(600);
+        });
+        fireEvent.pointerUp(target, touch);
+      };
+
+      press(checkbox.closest("label") as Element);
+      expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+      press(within(row).getByTestId("document-menu"));
+      expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+      expect(checkbox).not.toBeChecked();
+
+      press(within(row).getByTestId("document-card"));
+      expect(checkbox).toBeChecked();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("dashboard search controls", () => {

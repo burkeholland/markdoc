@@ -17,7 +17,16 @@ for (const width of [1440, 390]) {
       expect((await page.request.post("/api/documents/move", { data: { documentIds: [id], folderId: folder.id } })).ok()).toBeTruthy();
       await page.goto(entry === "folder page" ? `/f/${folder.id}` : "/");
       await waitForHydration(page);
-      if (entry === "dashboard folder") await page.locator(`[data-testid="folder-chip"][data-folder-id="${folder.id}"]`).click();
+      const chip = page.locator(`[data-testid="folder-chip"][data-folder-id="${folder.id}"]`);
+      if (entry === "dashboard folder") {
+        if (mobile) {
+          await page.getByTestId("library-toggle").click();
+          await page.getByTestId("library-drawer").locator(`[data-testid="folder-chip"][data-folder-id="${folder.id}"]`).click();
+          await expect(page.getByTestId("library-drawer")).toHaveCount(0);
+        } else {
+          await chip.click();
+        }
+      }
       if (entry !== "folder page") {
         if (entry === "main dashboard") await page.getByPlaceholder("Search documents", { exact: true }).fill("budget");
         await page.getByTestId("sort-select").selectOption("title");
@@ -25,7 +34,10 @@ for (const width of [1440, 390]) {
       const row = entry === "folder page"
         ? page.locator(`[data-testid="folder-document-row"][data-document-id="${id}"]`)
         : page.getByTestId("document-card").filter({ hasText: title }).locator("..");
-      if (entry !== "folder page") await row.getByTestId("select-document").locator("..").click();
+      if (entry !== "folder page") {
+        if (mobile) await page.getByTestId("select-mode").click();
+        await row.getByTestId("select-document").locator("..").click();
+      }
       const menu = row.getByTestId("document-menu");
       if (mobile) {
         await expect(menu).toHaveCSS("opacity", "1");
@@ -64,8 +76,15 @@ for (const width of [1440, 390]) {
         await expect(page.getByPlaceholder("Search documents", { exact: true })).toHaveValue(entry === "main dashboard" ? "budget" : "");
         await expect(page.getByTestId("sort-select")).toHaveValue("title");
         await expect(row.getByTestId("select-document")).toBeChecked();
-        if (entry === "dashboard folder") await expect(page.locator(`[data-testid="folder-chip"][data-folder-id="${folder.id}"]`)).toHaveAttribute("aria-pressed", "true");
-        await expect(page.getByTestId("filter-all")).toHaveAttribute("aria-pressed", "true");
+        if (mobile) await page.getByTestId("library-toggle").click();
+        const library = mobile ? page.getByTestId("library-drawer") : page.getByTestId("library-sidebar");
+        if (entry === "dashboard folder") {
+          await expect(library.locator(`[data-testid="folder-chip"][data-folder-id="${folder.id}"]`)).toHaveAttribute("aria-current", "page");
+          await expect(library.getByTestId("filter-all")).not.toHaveAttribute("aria-current", "page");
+        } else {
+          await expect(library.getByTestId("filter-all")).toHaveAttribute("aria-current", "page");
+        }
+        if (mobile) await page.keyboard.press("Escape");
       }
       await openShare();
       await expect(page.getByTestId("share-login")).toHaveValue("");
