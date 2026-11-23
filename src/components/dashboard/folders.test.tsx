@@ -534,6 +534,20 @@ describe("the folder rail", () => {
     expect(screen.getByTestId("empty-state")).not.toHaveTextContent("Try a different search");
   });
 
+  it("leaves the Starred view when a new folder is created", async () => {
+    createFolder.mockResolvedValue({ folder: folder("new", "Ideas") });
+    await mount([doc("d1", "One"), doc("d2", "Two")]);
+
+    fireEvent.click(screen.getByTestId("filter-starred"));
+    expect(screen.getByTestId("filter-starred")).toHaveAttribute("aria-current", "page");
+    fireEvent.click(screen.getByTestId("new-folder"));
+    fireEvent.change(screen.getByTestId("folder-name-input"), { target: { value: "Ideas" } });
+    fireEvent.submit(screen.getByTestId("folder-name-form"));
+
+    await waitFor(() => expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-current", "page"));
+    expect(screen.getByTestId("filter-starred")).not.toHaveAttribute("aria-current");
+  });
+
   it("will not submit a name that is only whitespace", async () => {
     await mount([]);
     fireEvent.click(screen.getByTestId("new-folder"));

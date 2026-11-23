@@ -387,6 +387,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const libraryToggleRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const query = window.matchMedia("(min-width: 768px)");
+    const closeOnWide = () => query.matches && setDrawerOpen(false);
+    closeOnWide();
+    query.addEventListener("change", closeOnWide);
+    return () => query.removeEventListener("change", closeOnWide);
+  }, [drawerOpen]);
   const [selectMode, setSelectMode] = useState(false);
   const longPressTimer = useRef<number | undefined>(undefined);
   const longPressed = useRef<string | null>(null);
@@ -1411,7 +1420,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         >
           {creating === CREATE_BLANK_KEY ? <Loader2 size={15} className="animate-spin" /> : <FilePlus2 size={15} />} New document
         </button>
-        <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
+        <Dialog open={openTemplates && (close ? drawerOpen : !drawerOpen)} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
           <DialogTrigger asChild>
             <button
               type="button"
@@ -1500,6 +1509,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           <div className="safe-x mx-auto flex h-16 max-w-[1600px] items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <button
               type="button"
+              ref={libraryToggleRef}
               className="icon-btn tap-target relative -ml-2 h-11 w-11 shrink-0 md:hidden"
               onClick={() => setDrawerOpen(true)}
               aria-label="Open library"
@@ -1576,7 +1586,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           >
             {renderSidebar()}
           </aside>
-        <section className="safe-x min-w-0 flex-1 py-5 sm:py-6 md:[--safe-pad:2rem]">
+        <section className="safe-x min-w-0 flex-1 py-5 pb-[calc(8rem+env(safe-area-inset-bottom))] sm:py-6 sm:pb-[calc(8rem+env(safe-area-inset-bottom))] md:pb-6 md:[--safe-pad:2rem]">
           <NotificationsStrip />
           <div className="mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
             <div className="min-w-0">
@@ -1740,7 +1750,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             </div>
           ) : (
             <div className="overflow-hidden rounded-xl border border-line bg-surface">
-              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 md:flex" aria-hidden="true">
+              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 lg:flex" aria-hidden="true">
                 <span className="w-6 shrink-0" />
                 <span className="w-9 shrink-0" />
                 <span className="min-w-0 flex-1">Name</span>
@@ -1786,7 +1796,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     // A real checkbox, so the row is selectable from the keyboard and screen readers read its state.
                     <label
                       className={cn(
-                        "tap-target document-selection-target relative inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center",
+                        "tap-target relative inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center",
                         selectMode || selectedIds.size > 0 ? "max-md:w-11" : "max-md:hidden",
                       )}
                     >
@@ -1836,7 +1846,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       ) : (
                         <span className="hidden truncate text-[13px] text-ink-3 md:block">{d.excerpt || "Empty document"}</span>
                       )}
-                      <span className="flex items-center gap-1.5 text-xs text-ink-3 md:hidden">
+                      <span className="flex items-center gap-1.5 text-xs text-ink-3 lg:hidden">
                         {folder ? <FolderIcon size={12} className="shrink-0" /> : <Inbox size={12} className="shrink-0" />}
                         <span className="truncate">{folder?.name ?? "No folder"}</span>
                         <span aria-hidden="true">·</span>
@@ -1844,7 +1854,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         {d.ownerId !== user.id && <span className="truncate">· {d.ownerName ?? d.ownerLogin}</span>}
                       </span>
                     </span>
-                    <span className="hidden w-40 shrink-0 md:block">
+                    <span className="hidden w-40 shrink-0 lg:block">
                       {folder && (
                         <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-xs text-ink-2">
                           <FolderIcon size={12} className="shrink-0" />
@@ -1852,10 +1862,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         </span>
                       )}
                     </span>
-                    <span className="hidden w-16 shrink-0 md:block">
+                    <span className="hidden w-16 shrink-0 lg:block">
                       <Avatar name={d.ownerName ?? d.ownerLogin ?? "Owner"} size={24} alt={d.ownerId === user.id ? "You" : `Owner ${d.ownerName ?? d.ownerLogin}`} />
                     </span>
-                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 md:block">
+                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 lg:block">
                       {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} />}
                     </span>
                   </Link>
@@ -1931,7 +1941,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         <Dialog open={drawerOpen} onOpenChange={setDrawerOpen}>
           <DialogPortal>
             <DialogOverlay className="dialog-overlay animate-fade-in" />
-            <DialogPrimitiveContent className="drawer overflow-y-auto px-3 py-4 md:hidden" aria-describedby={undefined} data-testid="library-drawer">
+            <DialogPrimitiveContent
+              className="drawer overflow-y-auto px-3 py-4 md:hidden"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                libraryToggleRef.current?.focus();
+              }}
+              aria-describedby={undefined} data-testid="library-drawer">
               <DialogTitle className="sr-only">Library</DialogTitle>
               <div className="mb-3 flex items-center justify-between px-1">
                 <span className="flex items-center gap-2.5">

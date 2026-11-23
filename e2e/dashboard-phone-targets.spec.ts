@@ -60,6 +60,9 @@ test("folder hit areas stay separate at 375px", async ({ browser }) => {
     await drawer(page).getByTestId("new-folder").click();
     await page.getByTestId("folder-name-input").fill("Phone hit areas");
     await page.getByTestId("folder-name-submit").click();
+    // Creating a folder navigates to it, which closes the drawer.
+    await expect(drawer(page)).toHaveCount(0);
+    await openLibrary(page);
     await expect(drawer(page).getByTestId("folder-chip")).toBeVisible();
 
     for (const [testId, label] of [
@@ -148,8 +151,9 @@ test("folder-sharing controls remain readable and tappable at 375px", async ({ b
     await drawer(page).getByTestId("new-folder").click();
     await page.getByTestId("folder-name-input").fill("Phone share");
     await page.getByTestId("folder-name-submit").click();
+    await expect(drawer(page)).toHaveCount(0);
+    await openLibrary(page);
     const folderChip = drawer(page).getByTestId("folder-chip").filter({ hasText: "Phone share" });
-    if ((await drawer(page).count()) === 0) await openLibrary(page);
     await expect(folderChip).toBeVisible();
 
     await drawer(page).getByTestId("folder-menu").click();

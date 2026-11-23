@@ -30,8 +30,9 @@ test.describe("phone overlays", () => {
       await devLogin(page, uniqueLogin(`phone-overlays-${viewport.width}`));
       await page.waitForLoadState("networkidle");
 
-      await page.getByTestId("new-from-template").click();
-      const templateDialog = page.getByRole("dialog");
+      await page.getByTestId("library-toggle").click();
+      await page.getByTestId("library-drawer").getByTestId("new-from-template").click();
+      const templateDialog = page.getByRole("dialog", { name: "New from template" });
       await expect(templateDialog).toBeVisible();
       await expectTappableClose(templateDialog);
       await expectNoHorizontalOverflow(page);

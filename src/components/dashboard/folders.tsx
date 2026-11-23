@@ -266,7 +266,7 @@ export function FolderRail({ state, unfiledCount, folderViewActive, onNavigate, 
     const trimmed = name.trim();
     if (!trimmed) return;
     if (naming?.mode === "rename") await state.rename(naming.folder.id, trimmed);
-    else await state.create(trimmed);
+    else if (await state.create(trimmed)) onNavigate?.();
     setNaming(null);
   };
 
