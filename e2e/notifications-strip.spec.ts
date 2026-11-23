@@ -56,9 +56,15 @@ test.describe("dashboard notification strip with real input", () => {
     return { x: box.x + box.width * fraction, y: box.y + box.height / 2 };
   };
   const centre = (target: Locator) => pointAt(target, 0.5);
+  /** The heading right under the strip: it moves up when the strip leaves, at any width. */
+  const belowStrip = (page: Page) => page.getByTestId("library-title");
+  /** The first control after the strip on a desktop screen, now that "New document" lives in the sidebar before it. */
+  const afterStrip = (page: Page) => page.getByTestId("open-file");
+  /** The last control before the strip: the end of the library sidebar. */
+  const beforeStrip = (page: Page) => page.getByTestId("library-sidebar").locator("a:visible, button:visible, input:visible, select:visible").last();
   /** Presses Tab until the target has focus, as a keyboard user would reach it. */
   const tabTo = async (target: Locator) => {
-    for (let presses = 0; presses < 20; presses += 1) {
+    for (let presses = 0; presses < 60; presses += 1) {
       await recipient.page.keyboard.press("Tab");
       if (await target.evaluate((element) => element === document.activeElement)) return;
     }
@@ -244,7 +250,7 @@ test.describe("dashboard notification strip with real input", () => {
       await expect(status).toHaveText("No unread notifications");
       await expect(status).toHaveAttribute("role", "status");
       await page.keyboard.press(next);
-      await expect(next === "Tab" ? page.getByTestId("new-document") : page.getByRole("button", { name: "Account" })).toBeFocused();
+      await expect(next === "Tab" ? afterStrip(page) : beforeStrip(page)).toBeFocused();
       await expect(status).toHaveCount(0);
     };
 
@@ -343,7 +349,7 @@ test.describe("dashboard notification strip with real input", () => {
     const strip = await openDashboard(1, page);
     const row = strip.getByTestId("notification-item");
     const id = await row.getAttribute("data-notification-id");
-    const below = page.getByTestId("new-document");
+    const below = belowStrip(page);
     const before = { strip: await boxOf(strip), below: await boxOf(below) };
     const { x, y } = await pointAt(row.getByTestId("notification-open"), fraction);
     const nothingElse = await watchStrayClicks(page);
@@ -588,7 +594,7 @@ test.describe("dashboard notification strip with real input", () => {
   const expectEmptiesInPlace = async (page: Page, rows: number, target: (strip: Locator) => Locator, edge: number | null, gesture: (x: number, y: number) => Promise<void>) => {
     await shareNew(rows);
     const strip = await openDashboard(rows, page);
-    const below = page.getByTestId("new-document");
+    const below = belowStrip(page);
     const withStrip = await boxOf(below);
     const box = await boxOf(target(strip));
     const point = { x: edge === null ? box.x + box.width / 2 : box.x + edge, y: box.y + box.height / 2 };
@@ -627,7 +633,8 @@ test.describe("dashboard notification strip with real input", () => {
 
   test("the place of an emptied strip closes by itself, takes no focus, and from the keyboard closes at once", async () => {
     const page = recipient.page;
-    const below = page.getByTestId("new-document");
+    const below = belowStrip(page);
+    const after = afterStrip(page);
     const status = page.getByTestId("notifications-strip-status");
     await shareNew(2);
     let strip = await openDashboard(2);
@@ -641,13 +648,13 @@ test.describe("dashboard notification strip with real input", () => {
     expect(await boxOf(below)).toEqual(withStrip);
     // The place is still held. Tab goes straight on to what follows the strip.
     await page.keyboard.press("Tab");
-    await expect(below).toBeFocused();
+    await expect(after).toBeFocused();
     await expect(status).toHaveCount(0);
     await expect.poll(async () => (await boxOf(below)).y, { timeout: 5_000 }).toBeLessThan(withStrip.y);
     const settled = await boxOf(below);
-    await expect(below).toBeFocused();
+    await expect(after).toBeFocused();
     await page.keyboard.press("Shift+Tab");
-    await expect(page.getByRole("button", { name: "Account" })).toBeFocused();
+    await expect(beforeStrip(page)).toBeFocused();
     await reloadHydrated(page);
     expect(await boxOf(below)).toEqual(settled);
 
@@ -675,7 +682,7 @@ test.describe("dashboard notification strip with real input", () => {
   ) => {
     await shareNew(3);
     const strip = await openDashboard(3, page);
-    const below = page.getByTestId("new-document");
+    const below = belowStrip(page);
     const place = page.getByTestId("notifications-strip-emptied");
     const withStrip = await boxOf(below);
     const control = await boxOf(strip.getByTestId("notifications-strip-read-all"));

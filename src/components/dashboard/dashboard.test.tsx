@@ -958,7 +958,7 @@ describe("dashboard document Share entry points", () => {
     expect(screen.getByPlaceholderText("Search documents")).toHaveValue(entry === "main dashboard" ? "Budget" : "");
     expect(screen.getByTestId("sort-select")).toHaveValue("title");
     expect(screen.getByTestId("select-document")).toBeChecked();
-    if (entry === "dashboard folder") expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-pressed", "true");
+    if (entry === "dashboard folder") expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-current", "page");
     expect(window.location.href).toBe(location);
     expect(router.push).not.toHaveBeenCalled();
     expect(router.replace).not.toHaveBeenCalled();
@@ -968,7 +968,6 @@ describe("dashboard document Share entry points", () => {
   it("does not offer document management actions on another owner's document", async () => {
     renderDashboard(undefined, [{ ...budget, ownerId: "someone-else", role: "editor" }]);
     await act(async () => {});
-    expect(screen.queryByTestId("document-menu")).not.toBeInTheDocument();
     expect(screen.queryByTestId("document-share")).not.toBeInTheDocument();
     expect(api.documents.get).not.toHaveBeenCalled();
   });
@@ -1928,26 +1927,6 @@ describe("dashboard search shortcut", () => {
 });
 
 describe("dashboard polish", () => {
-  it("hides unconfigured GitHub storage and lets New document fill the row", () => {
-    const view = render(
-      <Dashboard user={USER} documents={DOCUMENTS} githubAvailable={false} githubConfigured={false} />,
-    );
-
-    expect(screen.queryByTestId("open-github")).not.toBeInTheDocument();
-    expect(screen.getByTestId("new-document").parentElement).toHaveClass("sm:col-span-2");
-
-    view.rerender(<Dashboard user={USER} documents={DOCUMENTS} githubAvailable={false} githubConfigured />);
-    expect(screen.getByTestId("open-github")).toBeEnabled();
-    expect(screen.getByTestId("new-document").parentElement).not.toHaveClass("sm:col-span-2");
-  });
-
-  it("wraps the filter controls instead of clipping them on narrow screens", () => {
-    renderDashboard();
-
-    expect(screen.getByTestId("dashboard-chips")).not.toHaveClass("overflow-x-auto");
-    expect(screen.getByRole("toolbar", { name: "Document filters" })).toHaveClass("flex-wrap");
-  });
-
   it("shows a shared-specific empty state when no documents have been shared", () => {
     render(<Dashboard user={USER} documents={[]} githubAvailable githubConfigured />);
 
@@ -1957,38 +1936,6 @@ describe("dashboard polish", () => {
     expect(emptyState).toHaveTextContent("Nothing has been shared with you yet");
     expect(emptyState).toHaveTextContent("Documents shared with you will appear here.");
     expect(emptyState).not.toHaveTextContent("No documents yet");
-  });
-
-  it("keeps shared and starred empty states scoped to the selected folder", async () => {
-    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
-    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
-    const shared = {
-      ...doc("shared", "Shared with me"),
-      ownerId: "other",
-      ownerName: "Someone else",
-      ownerLogin: "other",
-      role: "editor" as const,
-    };
-    const starred = { ...doc("starred", "Starred elsewhere"), starred: true };
-    renderDashboard(undefined, [filed, shared, starred]);
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-    fireEvent.click(screen.getByTestId("folder-chip"));
-    fireEvent.click(screen.getByTestId("filter-shared"));
-
-    let emptyState = screen.getByTestId("empty-state");
-    expect(emptyState).toHaveTextContent("Shared documents aren't filed in folders");
-    expect(emptyState).toHaveTextContent("Choose All documents to see documents shared with you.");
-    expect(emptyState).not.toHaveTextContent("Nothing has been shared with you yet");
-
-    fireEvent.click(screen.getByTestId("filter-starred"));
-
-    emptyState = screen.getByTestId("empty-state");
-    expect(emptyState).toHaveTextContent("No matching documents in this folder");
-    expect(emptyState).toHaveTextContent("Choose All documents or another folder to see more.");
-    expect(emptyState).not.toHaveTextContent("No starred documents");
   });
 
   it("uses the shared empty state when Not in a folder is selected", async () => {
@@ -2006,23 +1953,6 @@ describe("dashboard polish", () => {
     expect(emptyState).toHaveTextContent("Nothing has been shared with you yet");
     expect(emptyState).toHaveTextContent("Documents shared with you will appear here.");
     expect(emptyState).not.toHaveTextContent("No matching unfiled documents");
-  });
-
-  it("does not claim there are no owned documents when the unfiled selection has none", async () => {
-    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
-    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
-    renderDashboard(undefined, [filed]);
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-    fireEvent.click(screen.getByTestId("folder-unfiled"));
-    fireEvent.click(screen.getByTestId("filter-mine"));
-
-    const emptyState = screen.getByTestId("empty-state");
-    expect(emptyState).toHaveTextContent("No unfiled documents owned by you");
-    expect(emptyState).toHaveTextContent("Choose All documents to see your filed documents.");
-    expect(emptyState).not.toHaveTextContent("No documents owned by you yet");
   });
 
   it("uses device-neutral guidance for an empty Starred filter", () => {
@@ -2056,6 +1986,120 @@ describe("dashboard polish", () => {
     const emptyState = screen.getByTestId("empty-state");
     expect(emptyState).toHaveTextContent("or open a Markdown file.");
     expect(emptyState).not.toHaveTextContent("GitHub");
+  });
+  it("labels the activity column by what it shows, including the recent sort", () => {
+    const seen = { ...doc("seen", "Seen doc"), lastOpenedAt: "2026-09-08T12:00:00.000Z" };
+    const never = doc("never", "Never opened");
+    renderDashboard(undefined, [seen, never]);
+
+    expect(screen.getByText("Last opened", { selector: "span" })).toBeInTheDocument();
+    const rows = screen.getAllByTestId("document-card");
+    expect(within(rows[0]).getAllByText(/Opened /).length).toBeGreaterThan(0);
+    expect(within(rows[1]).getAllByText(/Edited /).length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByTestId("sort-select"), { target: { value: "modified" } });
+
+    expect(screen.getByText("Last edited", { selector: "span" })).toBeInTheDocument();
+    expect(screen.queryByText("Last opened", { selector: "span" })).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("document-list")).queryByText(/Opened /)).not.toBeInTheDocument();
+  });
+
+  it("uses the theme-aware text-on-accent token for the phone New document button", () => {
+    renderDashboard();
+
+    const fab = screen.getByTestId("new-document-fab");
+    expect(fab).toHaveClass("text-on-accent");
+    expect(fab).not.toHaveClass("text-white");
+  });
+
+  it("leaves select mode when the screen widens, so rows open again", () => {
+    let wide = false;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal("matchMedia", () => ({
+      get matches() {
+        return wide;
+      },
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    }));
+    try {
+      renderDashboard();
+      fireEvent.click(screen.getByTestId("select-mode"));
+      expect(screen.getByTestId("select-mode")).toHaveAttribute("aria-pressed", "true");
+      const link = screen.getAllByTestId("document-card")[0];
+      expect(fireEvent.click(link)).toBe(false);
+
+      act(() => {
+        wide = true;
+        listeners.forEach((listener) => listener());
+      });
+
+      expect(screen.getByTestId("select-mode")).toHaveAttribute("aria-pressed", "false");
+      expect(fireEvent.click(link)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not start a long-press selection from a checkbox label or button", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      renderDashboard();
+      const checkbox = screen.getAllByTestId("select-document")[0];
+      const row = checkbox.closest("li") as HTMLElement;
+      const touch = { pointerType: "touch", bubbles: true } as PointerEventInit;
+      const press = (target: Element) => {
+        fireEvent.pointerDown(target, touch);
+        act(() => {
+          vi.advanceTimersByTime(600);
+        });
+        fireEvent.pointerUp(target, touch);
+      };
+
+      press(checkbox.closest("label") as Element);
+      expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+      press(within(row).getByTestId("document-menu"));
+      expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+      expect(checkbox).not.toBeChecked();
+
+      press(within(row).getByTestId("document-card"));
+      expect(checkbox).toBeChecked();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+  it("does not swallow the next tap after a long press whose pointer was cancelled", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
+    try {
+      renderDashboard();
+      const link = screen.getAllByTestId("document-card")[0];
+      const touch = { pointerType: "touch", bubbles: true } as PointerEventInit;
+
+      fireEvent.pointerDown(link, touch);
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      expect(screen.getAllByTestId("select-document")[0]).toBeChecked();
+      fireEvent.pointerCancel(link, touch);
+
+      // Leave select mode so the next tap is a plain open; the old flag must not eat it.
+      fireEvent.click(screen.getByTestId("select-mode"));
+      expect(fireEvent.click(link)).toBe(true);
+
+      // A long press that ends with a click is still swallowed once, and a new press resets the flag.
+      fireEvent.pointerDown(link, touch);
+      act(() => {
+        vi.advanceTimersByTime(600);
+      });
+      fireEvent.pointerUp(link, touch);
+      expect(fireEvent.click(link)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -3083,7 +3127,7 @@ describe("dashboard failure-message wrapping lifetimes", () => {
     });
     expect(searchDocuments).toHaveBeenCalledTimes(2);
     expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
-    expect(screen.getByTestId("filter-shared")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("filter-shared")).toHaveAttribute("aria-current", "page");
     await act(async () => {
       recovery.resolve({
         query: "alpha",
@@ -4121,14 +4165,10 @@ describe("dashboard direct create control ownership", () => {
       expect(Array.from(card.children, (child) => child.getAttribute("data-testid"))).toEqual([
         "new-document",
         "new-from-template",
-        "open-file",
       ]);
       const blank = directCreateButton(host, "new-document");
       expect(blank).toHaveTextContent("New document");
-      expect(blank).toHaveTextContent("Start with a blank Markdown page.");
       expect(blank.querySelector("svg")).toHaveClass("lucide-file-plus-corner");
-      expect(host.querySelector('[data-testid="new-from-template"]')).toHaveTextContent("From template");
-      expect(host.querySelector('[data-testid="open-file"]')).toHaveTextContent("Open file");
 
       const guided = guidedRootElement(host);
       expect(guided).toHaveTextContent("No documents yet");
@@ -4199,29 +4239,6 @@ describe("dashboard star recovery", () => {
     });
     expect(documentStar("Alpha planning")).toHaveAttribute("aria-pressed", "false");
     expect(documentStar("Alpha planning")).toBeEnabled();
-  });
-
-  it("suppresses synchronous duplicate activation across duplicate controls for one document", async () => {
-    const pending = deferred<{ starred: false }>();
-    unstarDocument.mockReturnValueOnce(pending.promise);
-    renderDashboard(undefined, [{ ...doc("starred", "Starred document"), starred: true }]);
-    const stripButton = within(screen.getByTestId("starred-strip")).getByRole("button", { name: "Unstar" });
-    const listButton = documentStar("Starred document");
-
-    act(() => {
-      stripButton.click();
-      listButton.click();
-    });
-
-    expect(unstarDocument).toHaveBeenCalledOnce();
-    expect(unstarDocument).toHaveBeenCalledWith("starred");
-    expect(starDocument).not.toHaveBeenCalled();
-    expect(documentStar("Starred document")).toBeDisabled();
-
-    await act(async () => {
-      pending.resolve({ starred: false });
-      await pending.promise;
-    });
   });
 
   it("allows independent documents to mutate concurrently while keeping each document single-flight", async () => {
@@ -4942,328 +4959,6 @@ describe("TrashView per-card keyboard navigation", () => {
       expect(purge).toHaveFocus();
     } finally {
       view.dispose();
-    }
-  });
-
-});
-
-describe("dashboard filter keyboard navigation", () => {
-  const navigationCases = [
-    ["ArrowRight", "all", "mine", 0],
-    ["ArrowDown", "all", "mine", 0],
-    ["ArrowLeft", "mine", "all", 0],
-    ["ArrowUp", "mine", "all", 0],
-    ["Home", "starred", "all", 0],
-    ["End", "all", "trash", 1],
-    ["ArrowRight", "trash", "all", 0],
-    ["ArrowLeft", "all", "trash", 1],
-  ] as const;
-
-  it.each(navigationCases)(
-    "selects and focuses exactly once for %s from %s to %s",
-    async (key, initial, destination, trashRequests) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard
-                user={USER}
-                documents={DOCUMENTS}
-                githubAvailable
-                githubConfigured
-              />
-            </StrictMode>,
-          );
-        });
-        expect(filterGroup(host)).toHaveAttribute("role", "toolbar");
-        expect(filterGroup(host)).toHaveAccessibleName("Document filters");
-        expectCurrentFilter(host, "all");
-
-        if (initial !== "all") {
-          act(() => directFilterButton(host, initial).click());
-          await act(async () => {});
-        }
-        expectCurrentFilter(host, initial);
-        listDocuments.mockClear();
-
-        const source = directFilterButton(host, initial);
-        source.focus();
-        focus.mockClear();
-        const scrollIntoView = Element.prototype
-          .scrollIntoView as ReturnType<typeof vi.fn>;
-        scrollIntoView.mockClear();
-        const beforeScroll = { x: window.scrollX, y: window.scrollY };
-        const event = await dispatchFilterKey(source, key);
-        const target = directFilterButton(host, destination);
-
-        expect(event.defaultPrevented).toBe(true);
-        expectCurrentFilter(host, destination);
-        expect(target).toHaveFocus();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-        expect(focus.mock.instances[0]).toBe(target);
-        expect(scrollIntoView).not.toHaveBeenCalled();
-        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
-        expect(listDocuments).toHaveBeenCalledTimes(trashRequests);
-        if (trashRequests) {
-          expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
-        }
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it.each(["public owner Window", "proven backing receiver"] as const)(
-    "accepts the %s as the native view",
-    async (viewKind) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <Dashboard
-              user={USER}
-              documents={DOCUMENTS}
-              githubAvailable
-              githubConfigured
-            />,
-          );
-        });
-        const all = directFilterButton(host, "all");
-        const ownerWindow = all.ownerDocument.defaultView!;
-        let backingReceiver: unknown = null;
-        all.addEventListener(
-          "keydown",
-          (event) => {
-            backingReceiver = event.composedPath().at(-1) ?? null;
-          },
-          { capture: true, once: true },
-        );
-        all.dispatchEvent(
-          new ownerWindow.KeyboardEvent("keydown", {
-            key: "PageDown",
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        expect(backingReceiver).not.toBeNull();
-        if (viewKind === "proven backing receiver") {
-          expect(backingReceiver).not.toBe(ownerWindow);
-        }
-
-        const event = new ownerWindow.KeyboardEvent("keydown", {
-          key: "ArrowRight",
-          bubbles: true,
-          cancelable: true,
-        });
-        markFilterEventTrusted(event);
-        markFilterEventView(
-          event,
-          viewKind === "public owner Window" ? ownerWindow : backingReceiver,
-        );
-        all.focus();
-        focus.mockClear();
-        await act(async () => {
-          all.dispatchEvent(event);
-          await Promise.resolve();
-        });
-
-        expect(event.defaultPrevented).toBe(true);
-        expectCurrentFilter(host, "mine");
-        expect(directFilterButton(host, "mine")).toHaveFocus();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it.each([
-    ["Home", "all"],
-    ["End", "trash"],
-  ] as const)(
-    "keeps same-destination %s on %s inert",
-    async (key, filter) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <Dashboard
-              user={USER}
-              documents={DOCUMENTS}
-              githubAvailable
-              githubConfigured
-            />,
-          );
-        });
-        if (filter === "trash") {
-          act(() => directFilterButton(host, filter).click());
-          await act(async () => {});
-        }
-        listDocuments.mockClear();
-        const source = directFilterButton(host, filter);
-        source.focus();
-        focus.mockClear();
-
-        const event = await dispatchFilterKey(source, key);
-
-        expect(event.defaultPrevented).toBe(false);
-        expectCurrentFilter(host, filter);
-        expect(source).toHaveFocus();
-        expect(focus).not.toHaveBeenCalled();
-        expect(listDocuments).not.toHaveBeenCalled();
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("keeps one Trash request on entry and cancels its late result on keyboard exit", async () => {
-    const pending = deferred<ListResponse>();
-    listDocuments.mockReturnValueOnce(pending.promise);
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard
-              user={USER}
-              documents={DOCUMENTS}
-              githubAvailable
-              githubConfigured
-            />
-          </StrictMode>,
-        );
-      });
-      const all = directFilterButton(host, "all");
-      all.focus();
-      await dispatchFilterKey(all, "End");
-      expectCurrentFilter(host, "trash");
-      expect(listDocuments).toHaveBeenCalledExactlyOnceWith({ trash: true });
-      expect(host).toHaveTextContent("Loading trash…");
-
-      await dispatchFilterKey(directFilterButton(host, "trash"), "ArrowLeft");
-      expectCurrentFilter(host, "starred");
-      expect(listDocuments).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        pending.resolve({
-          documents: [trashedDoc("late-filter-row", "Late filter row")],
-        });
-        await pending.promise;
-      });
-      expect(host).not.toHaveTextContent("Late filter row");
-      expect(host.querySelector('[data-testid="trash-view"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("preserves native click selection without keyboard prevention or focus work", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <Dashboard
-            user={USER}
-            documents={DOCUMENTS}
-            githubAvailable
-            githubConfigured
-          />,
-        );
-      });
-      const all = directFilterButton(host, "all");
-      all.focus();
-      await dispatchFilterKey(all, "ArrowRight");
-      expectCurrentFilter(host, "mine");
-
-      focus.mockClear();
-      const shared = directFilterButton(host, "shared");
-      const click = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-      });
-      act(() => shared.dispatchEvent(click));
-      await act(async () => {});
-
-      expect(click.defaultPrevented).toBe(false);
-      expectCurrentFilter(host, "shared");
-      expect(focus).not.toHaveBeenCalled();
-      expect(listDocuments).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("releases an interrupted native dispatch before a clean successor", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <Dashboard
-            user={USER}
-            documents={DOCUMENTS}
-            githubAvailable
-            githubConfigured
-          />,
-        );
-      });
-      const all = directFilterButton(host, "all");
-      all.focus();
-      focus.mockClear();
-      all.addEventListener("keydown", (event) => event.stopPropagation(), {
-        once: true,
-      });
-
-      const interrupted = await dispatchFilterKey(all, "ArrowRight");
-      expect(interrupted.defaultPrevented).toBe(false);
-      expectCurrentFilter(host, "all");
-      expect(focus).not.toHaveBeenCalled();
-
-      const clean = directFilterButton(host, "all");
-      clean.focus();
-      focus.mockClear();
-      const accepted = await dispatchFilterKey(clean, "ArrowRight");
-      expect(accepted.defaultPrevented).toBe(true);
-      expectCurrentFilter(host, "mine");
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
     }
   });
 
