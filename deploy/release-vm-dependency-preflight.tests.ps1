@@ -74,6 +74,10 @@ Assert-Equal '4.13.16' $currentLock['packages']['node_modules/hono']['version'] 
   'The current lock must retain the remediated Hono version.'
 Assert-Equal '2.1.6' $currentLock['packages']['node_modules/@hono/node-server']['version'] `
   'The current lock must retain the remediated Hono Node server version.'
+Assert-Equal '16.4.5' $currentLock['packages']['node_modules/next']['version'] `
+  'The current lock must retain the remediated Next.js version.'
+Assert-Equal '16.4.5' $currentLock['packages']['node_modules/@next/env']['version'] `
+  'The current lock must align the Next.js environment package.'
 
 $workflowSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\deploy.yml') -Raw
 $checkout = $workflowSource.IndexOf('actions/checkout@v5', $workflowSource.IndexOf('runs-on: windows-latest'))
