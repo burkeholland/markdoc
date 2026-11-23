@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { ArrowRight, MessageSquare, Sparkles, Users, GitBranch, History, Columns2 } from "lucide-react";
 import { cookies } from "next/headers";
@@ -9,6 +8,7 @@ import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, isDashboardSort } from "@/lib/dashboard-sort";
 import { embeddedDocumentPath } from "@/server/http";
+import { LandingSignInLink } from "./landing-sign-in-link";
 
 export const dynamic = "force-dynamic";
 
@@ -49,11 +49,11 @@ function Landing() {
     <div className="min-h-screen bg-surface-2">
       <header className="app-header landing-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Wordmark />
-        <Link href="/login" className="btn btn-primary h-11 gap-2">
+        <LandingSignInLink id="header" className="btn btn-primary h-11 gap-2">
           <GitHubIcon size={16} />
           <span className="sm:hidden">Sign in</span>
           <span className="hidden sm:inline">Sign in with GitHub</span>
-        </Link>
+        </LandingSignInLink>
       </header>
       <main>
         <section className="landing-hero mx-auto max-w-6xl px-6 pb-16 pt-12">
@@ -65,9 +65,9 @@ function Landing() {
               straight to a gist or a repository.
             </p>
             <div className="landing-actions mt-8 flex flex-wrap items-center gap-3">
-              <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
+              <LandingSignInLink id="hero" className="btn btn-primary h-11 gap-2 px-5 text-base">
                 Get started <ArrowRight size={18} />
-              </Link>
+              </LandingSignInLink>
               <span className="text-sm text-ink-3">Free while in preview · GitHub account required</span>
             </div>
           </div>
@@ -92,9 +92,9 @@ function Landing() {
             </Feature>
           </div>
           <div className="mt-8 flex justify-center">
-            <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
+            <LandingSignInLink id="footer" className="btn btn-primary h-11 gap-2 px-5 text-base">
               Get started <ArrowRight size={18} />
-            </Link>
+            </LandingSignInLink>
           </div>
         </section>
       </main>
