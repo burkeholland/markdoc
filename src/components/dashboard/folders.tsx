@@ -310,7 +310,7 @@ export function FolderRail({ state, unfiledCount, folderViewActive, onNavigate, 
               {...dropProps(folder.id)}
             >
               <Folder size={16} className="shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+              <span className="min-w-0 flex-1 truncate" title={folder.name}>{folder.name}</span>
               <span className="text-xs text-ink-4 transition group-focus-within/folder:opacity-0 group-hover/folder:opacity-0 max-md:opacity-0">{folder.documentCount}</span>
             </button>
             <Menu>
@@ -356,7 +356,7 @@ export function FolderRail({ state, unfiledCount, folderViewActive, onNavigate, 
                 data-folder-id={folder.id}
               >
                 <Users size={16} className="shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+                <span className="min-w-0 flex-1 truncate" title={folder.name}>{folder.name}</span>
                 <span className="text-xs text-ink-4">{folder.documentCount}</span>
               </button>
             ))}
