@@ -126,7 +126,7 @@ test.describe("preview font", () => {
     const readerElements = reader.locator(".wordmark, .doc-title, .reader-body, .reader-body :is(h1, h2, h3, h4, h5, h6), .reader-body pre code");
     const readerTypography = await typography(readerElements);
     await expect(reader.getByTestId("reader-body").locator("h2").first()).toHaveCSS("font-family", /Fraunces/);
-    await expect(reader.getByTestId("reader-body").locator("h2").first()).toHaveCSS("font-variation-settings", '"SOFT" 30, "opsz" 36');
+    await expect(reader.getByTestId("reader-body").locator("h2").first()).toHaveCSS("font-variation-settings", '"SOFT" 30, "WONK" 0, "opsz" 36');
     const exported = await page.request.get(`/api/documents/${id}/export?format=html`);
     expect(exported.ok()).toBeTruthy();
     const originalExport = await exported.text();

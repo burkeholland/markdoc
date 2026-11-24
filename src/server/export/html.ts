@@ -50,7 +50,7 @@ function escapeHtml(text: string): string {
  * so the export still reads as the same design.
  */
 const STYLES = `
-@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,600,30&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,600,30,0&display=swap");
 :root { color-scheme: light; }
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -71,7 +71,7 @@ main > hr, main > hr + * { margin-top: calc(var(--md-space) * 1.75); }
 h1, h2, h3, h4, h5, h6 { color: #1c1917; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
 h1, h2, h3 {
   font-family: Fraunces, Georgia, "Times New Roman", serif; font-weight: 600; letter-spacing: -0.005em;
-  font-variation-settings: "opsz" 36, "SOFT" 30;
+  font-variation-settings: "opsz" 36, "SOFT" 30, "WONK" 0;
 }
 h1 { font-size: 2em; margin-top: var(--md-space-heading-before-h2); }
 h2 { font-size: 1.5em; margin-top: calc(var(--md-space-heading-before-h2) - 0.6em); padding-top: 0.6em; border-top: 1px solid #e7e5e4; }

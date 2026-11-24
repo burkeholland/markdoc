@@ -79,20 +79,20 @@ test("homepage sign-in action stays on one line beside the wordmark at 320px", a
   expect(desktopLabel, "desktop label keeps the GitHub detail").toBe("Sign in with GitHub");
 });
 
-test("homepage offers a next step after the features on phones", async ({ page }) => {
+test("homepage ends with a minimal footer after the product preview", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
-  const nextStep = page.locator('main a[href="/login"]').last();
-  await expect(nextStep).toHaveText("Sign in with GitHub");
+  await expect(page.locator("main > section")).toHaveCount(2);
+  await expect(page.locator("main > :last-child")).toHaveAttribute("aria-label", /^Markdoc split editor/);
+  await expect(page.getByRole("navigation")).toHaveCount(0);
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-  await expect(nextStep).toBeInViewport();
+  await expect(page.getByRole("contentinfo").getByRole("link", { name: "GitHub" })).toBeInViewport();
 });
 
 for (const action of [
   { name: "primary CTA", width: 768, height: 1024, selector: 'main a[href="/login"]', index: 0, keyboard: false },
   { name: "phone header", width: 390, height: 844, selector: 'header a[href="/login"]', index: 0, keyboard: true },
-  { name: "bottom CTA", width: 390, height: 844, selector: 'main a[href="/login"]', index: 1, keyboard: false },
 ]) {
   test(`${action.name} shows pending feedback until sign-in opens`, async ({ page }) => {
     await page.setViewportSize({ width: action.width, height: action.height });
@@ -150,9 +150,29 @@ for (const theme of ["light", "dark"] as const) {
         const accessibility = await new AxeBuilder({ page }).analyze();
         expect(accessibility.violations).toEqual([]);
       }
-      await page.getByRole("navigation", { name: "Explore Markdoc" }).getByRole("link", { name: "History" }).click();
-      await expect(page).toHaveURL(/#history$/);
-      await expect(page.getByRole("heading", { name: "Every version, kept." })).toBeInViewport();
     });
   }
+}
+
+for (const dpr of [1, 2]) {
+  test.describe(`display type at ${dpr}x DPR`, () => {
+    test.use({ deviceScaleFactor: dpr });
+    for (const width of [390, 1600]) {
+      test(`uses upright letterforms at ${width}px`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 1100 });
+        await page.goto("/");
+        await page.evaluate(() => document.fonts.ready);
+        for (const selector of [".wordmark", "h1", '[class*="editorTitle"]', '[class*="documentTitle"]', '[class*="documentHeading"]']) {
+          for (const heading of await page.locator(selector).all()) {
+            await expect(heading).toHaveCSS("font-variation-settings", /"WONK" 0/);
+          }
+        }
+        const title = page.locator('[class*="documentTitle"]');
+        const upright = await title.screenshot();
+        await title.evaluate(el => { el.style.fontVariationSettings = '"WONK" 1'; });
+        const leaning = await title.screenshot();
+        expect(upright.equals(leaning), "the loaded font must support disabling its leaning glyph substitutions").toBe(false);
+      });
+    }
+  });
 }
