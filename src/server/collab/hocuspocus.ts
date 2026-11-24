@@ -189,6 +189,8 @@ export function createCollabServer() {
     },
 
     async onChange({ document, documentName, context }: onChangePayload<CollabContext>) {
+      // Every contributor of a coalesced autosave is noted here, not only the last writer at store time.
+      if (context?.userId) noteUsage(context.userId, "edit");
       const seed = freshlySeeded.get(documentName);
       if (seed === undefined) return;
       // Only the first change after seeding can be the mirror artefact; anything later is an edit.
@@ -227,7 +229,6 @@ export function createCollabServer() {
         const stored = await pace.step(() => (db as NodePgDatabase<typeof schema>).update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning({ id: schema.documents.id }));
         if (stored.length !== 1) throw new Error("Document no longer exists");
         await maybeAutoVersion(documentName, content, lastContext ?? null, pace);
-        if (lastContext?.userId) noteUsage(lastContext.userId, "edit");
       } catch {
         // Hocuspocus logs hook messages; keep database and document details out of that diagnostic.
         throw new Error("Document persistence failed");

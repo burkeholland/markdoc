@@ -15,6 +15,7 @@ const written = new Map<string, string>();
  * Stores only the user, the UTC day and the kind. Unknown ids (anonymous link visitors) are ignored.
  */
 export async function recordUsage(userId: string, kind: UsageKind, at = new Date()): Promise<void> {
+  if (userId.startsWith("anon-")) return;
   const day = usageDay(at);
   const key = `${userId}\u0000${kind}`;
   if (written.get(key) === day) return;
