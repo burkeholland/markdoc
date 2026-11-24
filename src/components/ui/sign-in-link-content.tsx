@@ -8,8 +8,7 @@ export function SignInLinkContent({ children }: { children: ReactNode }) {
 
   return (
     <>
-      <span className={pending ? "hidden" : "contents"}>{children}</span>
-      <span aria-hidden="true" className={pending ? "" : "hidden"}>Opening sign-in…</span>
+      {pending ? <span aria-hidden="true">Opening sign-in…</span> : children}
       <span className="sr-only" role="status" aria-live="polite">
         {pending ? "Opening sign-in…" : ""}
       </span>

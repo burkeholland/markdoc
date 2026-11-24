@@ -22,7 +22,7 @@ it("updates the existing status and restores the label when navigation ends", ()
   expect(screen.getByRole("status")).toBe(status);
   expect(status).toHaveTextContent("Opening sign-in…");
   expect(screen.getByText("Opening sign-in…", { selector: '[aria-hidden="true"]' })).toBeVisible();
-  expect(screen.getByText("Get started")).not.toBeVisible();
+  expect(screen.queryByText("Get started")).toBeNull();
 
   pending = false;
   view.rerender(<SignInLinkContent>Get started</SignInLinkContent>);
