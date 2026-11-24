@@ -89,6 +89,23 @@ test("homepage offers a next step after the features on phones", async ({ page }
   await expect(nextStep).toBeInViewport();
 });
 
+for (const width of [761, 768, 1024, 1200, 1600]) {
+  test(`homepage source illustration is readable at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1024 });
+    await page.goto("/");
+    await page.evaluate(() => document.fonts.ready);
+
+    const source = page.locator('section[aria-label^="Markdoc split editor"] [class*="__source"]');
+    await expect(source).toBeVisible();
+    await expect(source.locator(":scope > div")).toHaveCount(20);
+    const dimensions = await source.evaluate((pane) => ({
+      clientWidth: pane.clientWidth,
+      scrollWidth: pane.scrollWidth,
+    }));
+    expect(dimensions.scrollWidth, "source lines fit inside the pane").toBeLessThanOrEqual(dimensions.clientWidth);
+  });
+}
+
 for (const action of [
   { name: "primary CTA", width: 768, height: 1024, selector: 'main a[href="/login"]', index: 0, keyboard: false },
   { name: "phone header", width: 390, height: 844, selector: 'header a[href="/login"]', index: 0, keyboard: true },
