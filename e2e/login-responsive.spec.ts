@@ -100,3 +100,28 @@ for (const viewport of viewports) {
     }
   });
 }
+
+test.describe("homepage link touch target", () => {
+  test.use({ hasTouch: true });
+
+  for (const viewport of [viewports[0], viewports[2]]) {
+    test(`is tappable below its text at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto("/login");
+
+      const link = page.getByTestId("login-home");
+      await link.scrollIntoViewIfNeeded();
+      const target = await boundingBox(link);
+      expect(target.height, "homepage link target height").toBeGreaterThanOrEqual(44);
+
+      const text = await link.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rect = range.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.bottom + 10 };
+      });
+      await page.touchscreen.tap(text.x, text.y);
+      await expect(page).toHaveURL("/");
+    });
+  }
+});
