@@ -26,6 +26,41 @@ for (const viewport of [
 }
 
 for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 320, height: 480 },
+]) {
+  test(`homepage header fits at ${viewport.width}px with enlarged root text`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+
+    const header = page.locator("header.app-header");
+    const brand = header.locator(".wordmark");
+    const signIn = header.getByRole("link", { name: "Sign in" });
+    const label = signIn.locator("span.sm\\:hidden");
+    await expect(brand).toBeVisible();
+    await expect(signIn).toBeVisible();
+    await expect(label).toHaveText("Sign in");
+
+    const brandBox = (await brand.boundingBox())!;
+    const buttonBox = (await signIn.boundingBox())!;
+    const labelBox = (await label.boundingBox())!;
+    expect(brandBox.x).toBeGreaterThanOrEqual(0);
+    expect(brandBox.x + brandBox.width).toBeLessThanOrEqual(viewport.width);
+    expect(buttonBox.x).toBeGreaterThanOrEqual(0);
+    expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(viewport.width);
+    expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+    expect(labelBox.x).toBeGreaterThanOrEqual(buttonBox.x);
+    expect(labelBox.x + labelBox.width).toBeLessThanOrEqual(buttonBox.x + buttonBox.width);
+    expect(await header.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+    expect(
+      buttonBox.x >= brandBox.x + brandBox.width || buttonBox.y >= brandBox.y + brandBox.height,
+      "wordmark and sign-in do not overlap",
+    ).toBe(true);
+  });
+}
+
+for (const viewport of [
   { width: 720, height: 430 },
   { width: 600, height: 400 },
   { width: 844, height: 390 },

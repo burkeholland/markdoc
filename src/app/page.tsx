@@ -48,7 +48,7 @@ function Feature({ icon, title, children }: { icon: React.ReactNode; title: stri
 function Landing() {
   return (
     <div className="min-h-screen bg-surface-2">
-      <header className="app-header landing-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
+      <header className="app-header landing-header mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-6 py-5">
         <Wordmark />
         <Link href="/login" className="btn btn-primary h-11 gap-2">
           <SignInLinkContent>
