@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Browser, Locator, Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, openDocument, reloadHydrated } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, openDocument, reloadHydrated, uniqueLogin, waitForHydration } from "./helpers";
 
 /**
  * Task #978: the desktop Comments / Versions / Activity panel is resizable from its left edge.
@@ -93,6 +93,92 @@ test.describe("resizable side panel (desktop)", () => {
     expect(await page.evaluate(() => localStorage.getItem("markdoc:panelWidth"))).toBe(String(DEFAULT_WIDTH));
 
     await context.close();
+  });
+
+  test.describe("full-width Library and resizable sidebar", () => {
+    const sidebar = (page: Page) => page.getByTestId("library-sidebar");
+    const grip = (page: Page) => page.getByRole("separator", { name: "Resize Library sidebar" });
+
+    test("fills wide windows and saves a dragged width; keyboard controls clamp and reset", async ({ page }) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await devLogin(page, uniqueLogin("library-resize"));
+      await createDocument(page, DOC, "Library width check");
+      await reloadHydrated(page);
+      await expect(sidebar(page)).toHaveCSS("width", "256px");
+      const header = (await page.locator("header > div").boundingBox())!;
+      expect(header.x).toBe(0);
+      expect(header.width).toBe(1920);
+      expect((await sidebar(page).boundingBox())!.x).toBe(0);
+      const content = (await page.locator("main > div > section").boundingBox())!;
+      expect(content.x + content.width).toBe(1920);
+
+      await dragHandle(page, 80);
+      await expect(sidebar(page)).toHaveCSS("width", "336px");
+      await reloadHydrated(page);
+      await expect(sidebar(page)).toHaveCSS("width", "336px");
+      await dragHandle(page, 300);
+      await expect(sidebar(page)).toHaveCSS("width", "400px");
+      await dragHandle(page, -600);
+      await expect(sidebar(page)).toHaveCSS("width", "224px");
+
+      await grip(page).focus();
+      expect(await page.evaluate(() => window.scrollY), "focusing the resize edge does not scroll the page").toBe(0);
+      await page.keyboard.press("ArrowRight");
+      await expect(grip(page)).toHaveAttribute("aria-valuenow", "240");
+      await page.keyboard.press("Shift+ArrowRight");
+      await expect(sidebar(page)).toHaveCSS("width", "304px");
+      await page.keyboard.press("ArrowLeft");
+      await expect(sidebar(page)).toHaveCSS("width", "288px");
+      await page.keyboard.press("Home");
+      await expect(sidebar(page)).toHaveCSS("width", "224px");
+      await page.keyboard.press("End");
+      await expect(sidebar(page)).toHaveCSS("width", "400px");
+      for (const width of [1600, 1024, 768]) {
+        await page.setViewportSize({ width, height: 1000 });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+        if (width === 1024) {
+          const title = page.getByTestId("document-card").getByRole("heading", { name: "Library width check" });
+          expect((await title.boundingBox())!.width, "document title remains readable with the widest sidebar").toBeGreaterThan(120);
+        }
+      }
+      await page.keyboard.press("Enter");
+      await expect(sidebar(page)).toHaveCSS("width", "256px");
+      await grip(page).press("End");
+      await grip(page).dblclick();
+      await expect(sidebar(page)).toHaveCSS("width", "256px");
+    });
+
+    test("clamps old stored widths and ignores invalid values", async ({ page }) => {
+      await devLogin(page, uniqueLogin("library-storage"));
+      for (const [stored, expected] of [["1200", "400px"], ["0", "224px"], ["bad", "256px"]]) {
+        await page.evaluate((width) => localStorage.setItem("markdoc:librarySidebarWidth", width), stored);
+        await reloadHydrated(page);
+        await expect(sidebar(page)).toHaveCSS("width", expected);
+      }
+    });
+
+    test("keeps the phone drawer independent of the saved desktop width", async ({ page }) => {
+      await devLogin(page, uniqueLogin("library-drawer"));
+      await waitForHydration(page);
+      await grip(page).press("End");
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(sidebar(page)).toBeHidden();
+      await expect(grip(page)).toBeHidden();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+      await page.getByTestId("library-toggle").click();
+      const drawer = page.getByTestId("library-drawer");
+      await expect(drawer).toBeVisible();
+      expect((await drawer.boundingBox())!.width).toBeLessThanOrEqual(390);
+      await drawer.getByTestId("filter-starred").click();
+      await expect(drawer).toHaveCount(0);
+      await expect(page.getByTestId("library-title")).toHaveText("Starred");
+      await expect(page.getByTestId("library-toggle")).toBeFocused();
+      await page.getByTestId("library-toggle").click();
+      await page.setViewportSize({ width: 1600, height: 1000 });
+      await expect(drawer).toHaveCount(0);
+      await expect(sidebar(page)).toHaveCSS("width", "400px");
+      await expect(grip(page)).toBeVisible();
+    });
   });
 
   test("the width is clamped to 280 px and to min(720, 60 % of the viewport)", async ({ browser }) => {

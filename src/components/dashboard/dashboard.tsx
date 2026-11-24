@@ -44,11 +44,16 @@ import { signOutSafely } from "@/lib/sign-out";
 import { DocumentShareDialog } from "./document-share-dialog";
 import { warmEditorWhenIdle } from "./warm-editor";
 import { OpeningDocument, OpeningDocumentBoundary } from "./opening-document";
+import { PanelResizeHandle, clampPanelWidth, parseStoredPanelWidth } from "@/components/editor/panel-resize-handle";
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
 
 const SEARCH_DEBOUNCE_MS = 250;
+const SIDEBAR_DEFAULT = 256;
+const SIDEBAR_MIN = 224;
+const SIDEBAR_MAX = 400;
+const SIDEBAR_WIDTH_KEY = "markdoc:librarySidebarWidth";
 const MIN_QUERY_LENGTH = 2;
 const DASHBOARD_SEARCH_STORAGE_KEY = "markdoc:dashboardSearch";
 const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
@@ -387,6 +392,24 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  useLayoutEffect(() => {
+    try {
+      const stored = parseStoredPanelWidth(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+      if (stored !== null) setSidebarWidth(clampPanelWidth(stored, SIDEBAR_MIN, SIDEBAR_MAX));
+    } catch (error) {
+      console.error("Could not restore Library sidebar width", error);
+    }
+  }, []);
+  const resizeSidebar = useCallback((next: number) => {
+    const width = clampPanelWidth(next, SIDEBAR_MIN, SIDEBAR_MAX);
+    setSidebarWidth(width);
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+    } catch (error) {
+      console.error("Could not persist Library sidebar width", error);
+    }
+  }, []);
   const libraryToggleRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!drawerOpen) return;
@@ -1515,7 +1538,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           {searchAnnouncement}
         </div>
         <header className="app-header sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
-          <div className="safe-x mx-auto flex h-16 max-w-[1600px] items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
+          <div className="safe-x flex h-16 items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <button
               type="button"
               ref={libraryToggleRef}
@@ -1587,14 +1610,27 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           </div>
         </header>
 
-        <div className="mx-auto flex max-w-[1600px] items-start">
-          <aside
-            className="sticky top-16 hidden h-[calc(100vh-4rem)] w-64 shrink-0 overflow-y-auto border-r border-line bg-surface px-3 py-4 md:block"
-            aria-label="Library"
-            data-testid="library-sidebar"
-          >
-            {renderSidebar()}
-          </aside>
+        <div className="flex items-start">
+          <div className="sticky top-[calc(4rem+1px)] hidden h-[calc(100dvh-4rem-1px)] shrink-0 md:block" style={{ width: sidebarWidth }}>
+            <aside
+              id="library-sidebar"
+              className="h-full overflow-y-auto border-r border-line bg-surface px-3 py-4"
+              aria-label="Library"
+              data-testid="library-sidebar"
+            >
+              {renderSidebar()}
+            </aside>
+            <PanelResizeHandle
+              side="left"
+              label="Resize Library sidebar"
+              controls="library-sidebar"
+              width={sidebarWidth}
+              min={SIDEBAR_MIN}
+              max={SIDEBAR_MAX}
+              onResize={resizeSidebar}
+              onReset={() => resizeSidebar(SIDEBAR_DEFAULT)}
+            />
+          </div>
         <section className="safe-x min-w-0 flex-1 py-5 pb-[calc(8rem+env(safe-area-inset-bottom))] sm:py-6 sm:pb-[calc(8rem+env(safe-area-inset-bottom))] md:pb-6 md:[--safe-pad:2rem]">
           <NotificationsStrip />
           <div className="mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
@@ -1758,8 +1794,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
           ) : (
-            <div className="overflow-hidden rounded-xl border border-line bg-surface">
-              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 lg:flex" aria-hidden="true">
+            <div className="@container/library-list overflow-hidden rounded-xl border border-line bg-surface">
+              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 @min-[52rem]/library-list:flex" aria-hidden="true">
                 <span className="w-6 shrink-0" />
                 <span className="w-9 shrink-0" />
                 <span className="min-w-0 flex-1">Name</span>
@@ -1864,7 +1900,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       ) : (
                         <span className="hidden truncate text-[13px] text-ink-3 md:block">{d.excerpt || "Empty document"}</span>
                       )}
-                      <span className="flex items-center gap-1.5 text-xs text-ink-3 lg:hidden">
+                      <span className="flex items-center gap-1.5 text-xs text-ink-3 @min-[52rem]/library-list:hidden">
                         {folder ? <FolderIcon size={12} className="shrink-0" /> : <Inbox size={12} className="shrink-0" />}
                         <span className="truncate">{folder?.name ?? "No folder"}</span>
                         <span aria-hidden="true">·</span>
@@ -1872,7 +1908,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         {d.ownerId !== user.id && <span className="truncate">· {d.ownerName ?? d.ownerLogin}</span>}
                       </span>
                     </span>
-                    <span className="hidden w-40 shrink-0 lg:block">
+                    <span className="hidden w-40 shrink-0 @min-[52rem]/library-list:block">
                       {folder && (
                         <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-xs text-ink-2">
                           <FolderIcon size={12} className="shrink-0" />
@@ -1880,10 +1916,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         </span>
                       )}
                     </span>
-                    <span className="hidden w-16 shrink-0 lg:block">
+                    <span className="hidden w-16 shrink-0 @min-[52rem]/library-list:block">
                       <Avatar name={d.ownerName ?? d.ownerLogin ?? "Owner"} size={24} alt={d.ownerId === user.id ? "You" : `Owner ${d.ownerName ?? d.ownerLogin}`} />
                     </span>
-                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 lg:block">
+                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 @min-[52rem]/library-list:block">
                       {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix={sort === "recent" ? "Edited " : undefined} />}
                     </span>
                   </Link>

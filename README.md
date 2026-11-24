@@ -77,6 +77,11 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 
 Sign in is GitHub only (OAuth), with a development login for local work.
 
+The Library fills the window. On desktop, drag the sidebar's right edge to resize it
+between 224 and 400 pixels; the width is remembered in this browser. With the edge focused,
+use Left/Right to resize (Shift for larger steps), Home/End for the limits, or Enter to reset.
+A double-click also restores the default width. Phones keep the Library drawer.
+
 ### Keyboard shortcuts
 
 `Ctrl` is `Cmd` on macOS. Press `Ctrl+/` in the editor for the full list.

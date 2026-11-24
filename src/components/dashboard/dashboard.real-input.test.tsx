@@ -56,6 +56,7 @@ const doc = (id: string, title: string, deletedAt: string | null = null): Docume
 });
 
 beforeEach(() => {
+  localStorage.removeItem("markdoc:librarySidebarWidth");
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   listDocuments.mockReset();
   listDocuments.mockResolvedValue({ documents: [doc("t1", "Trashed", "2026-09-07T13:00:00.000Z")] });
@@ -76,6 +77,26 @@ it("sidebar views respond to real clicks and keyboard activation", async () => {
   await user.keyboard("{Enter}");
   expect(screen.getByTestId("filter-all")).toHaveAttribute("aria-current", "page");
   expect(screen.getByTestId("filter-shared")).not.toHaveAttribute("aria-current");
+});
+
+it("restores the sidebar width and persists keyboard resizing and reset", async () => {
+  localStorage.setItem("markdoc:librarySidebarWidth", "320");
+  const user = userEvent.setup();
+  renderDashboard();
+  const handle = screen.getByRole("separator", { name: "Resize Library sidebar" });
+  expect(screen.getByTestId("library-sidebar").parentElement).toHaveStyle({ width: "320px" });
+  expect(handle).toHaveAttribute("aria-controls", "library-sidebar");
+  handle.focus();
+  await user.keyboard("{ArrowRight}");
+  expect(handle).toHaveAttribute("aria-valuenow", "336");
+  expect(localStorage.getItem("markdoc:librarySidebarWidth")).toBe("336");
+  await user.keyboard("{End}");
+  expect(handle).toHaveAttribute("aria-valuenow", "400");
+  await user.keyboard("{Home}");
+  expect(handle).toHaveAttribute("aria-valuenow", "224");
+  await user.keyboard("{Enter}");
+  expect(handle).toHaveAttribute("aria-valuenow", "256");
+  expect(localStorage.getItem("markdoc:librarySidebarWidth")).toBe("256");
 });
 
 it("restores a trashed document with a real click and moves between trash actions by keyboard", async () => {
