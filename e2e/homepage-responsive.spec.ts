@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
 import { cssPx } from "./helpers";
+import AxeBuilder from "@axe-core/playwright";
 
 test("homepage exposes its header as a banner landmark separate from main", async ({ page }) => {
   await page.goto("/");
@@ -83,7 +84,7 @@ test("homepage offers a next step after the features on phones", async ({ page }
   await page.goto("/");
 
   const nextStep = page.locator('main a[href="/login"]').last();
-  await expect(nextStep).toHaveText("Get started");
+  await expect(nextStep).toHaveText("Sign in with GitHub");
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect(nextStep).toBeInViewport();
 });
@@ -114,6 +115,7 @@ for (const action of [
       } else {
         await link.click();
       }
+
       await expect(status).toHaveText("Opening sign-in…");
       await expect(link.locator('[aria-hidden="true"]', { hasText: "Opening sign-in…" })).toBeVisible();
       await expect(page).toHaveURL("/");
@@ -125,4 +127,30 @@ for (const action of [
     await page.goBack();
     await expect(status).toBeEmpty();
   });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [320, 390, 844, 1600]) {
+    test(`product-first homepage fits ${width}px in ${theme} mode`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto("/");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(page.getByRole("heading", { level: 1 })).toHaveText("Markdown,together.");
+      const dimensions = await page.evaluate(() => ({
+        viewport: document.documentElement.clientWidth,
+        content: document.documentElement.scrollWidth,
+        shot: document.querySelector('section[aria-label^="Markdoc split editor"]')!.getBoundingClientRect().width,
+      }));
+      expect(dimensions.content, "page has no horizontal scrolling").toBeLessThanOrEqual(dimensions.viewport);
+      expect(dimensions.shot, "product preview uses the full window width").toBe(dimensions.viewport);
+      if (width === 390 || width === 1600) {
+        const accessibility = await new AxeBuilder({ page }).analyze();
+        expect(accessibility.violations).toEqual([]);
+      }
+      await page.getByRole("navigation", { name: "Explore Markdoc" }).getByRole("link", { name: "History" }).click();
+      await expect(page).toHaveURL(/#history$/);
+      await expect(page.getByRole("heading", { name: "Every version, kept." })).toBeInViewport();
+    });
+  }
 }

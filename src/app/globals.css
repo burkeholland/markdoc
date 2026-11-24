@@ -2194,33 +2194,3 @@ body {
     min-height: 44px;
   }
 }
-
-@media (max-height: 500px) {
-  .landing-header {
-    padding-block: 0.75rem;
-  }
-
-  .landing-hero {
-    padding-top: 1rem;
-    padding-bottom: 2rem;
-  }
-
-  .landing-title {
-    font-size: 2rem;
-    line-height: 1.2;
-  }
-
-  .landing-summary {
-    margin-top: 0.5rem;
-    line-height: 1.5;
-  }
-
-  .landing-detail {
-    margin-top: 0.75rem;
-    line-height: 1.5;
-  }
-
-  .landing-actions {
-    margin-top: 1rem;
-  }
-}
