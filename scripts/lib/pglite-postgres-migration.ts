@@ -46,6 +46,7 @@ export const APPLICATION_TABLES = [
   "api_token",
   "asset",
   "collaborator",
+  "daily_usage",
   "document",
   "folder",
   "folder_collaborator",

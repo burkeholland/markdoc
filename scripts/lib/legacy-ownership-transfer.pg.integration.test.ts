@@ -80,7 +80,7 @@ describePostgres("legacy ownership transfer on PostgreSQL", () => {
       committed: false,
       verified: true,
       transferId: null,
-      schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
+      schema: { userForeignKeys: 13, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
       selection: { sourceUsers: 1, sourceIsLegacy: true, sourceAccounts: 0, sourceSessions: 0, targetAccounts: 1, targetIsSource: false, sameLogin: false },
       documents: { sourceBefore: 2, targetBefore: 7, targetAfter: 9 },
       residualReferences: 0,
@@ -232,6 +232,7 @@ async function residualReferenceCount(database: Client): Promise<number> {
        (SELECT COUNT(*) FROM folder_collaborator WHERE added_by = $1 OR lower(login) = $2) +
        (SELECT COUNT(*) FROM star WHERE user_id = $1) +
        (SELECT COUNT(*) FROM recent WHERE user_id = $1) +
+       (SELECT COUNT(*) FROM daily_usage WHERE user_id = $1) +
        (SELECT COUNT(*) FROM api_token WHERE user_id = $1) +
        (SELECT COUNT(*) FROM asset WHERE user_id = $1) +
        (SELECT COUNT(*) FROM agent_request WHERE user_id = $1) +
