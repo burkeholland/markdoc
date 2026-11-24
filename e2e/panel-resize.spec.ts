@@ -122,6 +122,7 @@ test.describe("resizable side panel (desktop)", () => {
       await expect(sidebar(page)).toHaveCSS("width", "224px");
 
       await grip(page).focus();
+      expect(await page.evaluate(() => window.scrollY), "focusing the resize edge does not scroll the page").toBe(0);
       await page.keyboard.press("ArrowRight");
       await expect(grip(page)).toHaveAttribute("aria-valuenow", "240");
       await page.keyboard.press("Shift+ArrowRight");
@@ -132,9 +133,13 @@ test.describe("resizable side panel (desktop)", () => {
       await expect(sidebar(page)).toHaveCSS("width", "224px");
       await page.keyboard.press("End");
       await expect(sidebar(page)).toHaveCSS("width", "400px");
-      for (const width of [1600, 768]) {
+      for (const width of [1600, 1024, 768]) {
         await page.setViewportSize({ width, height: 1000 });
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+        if (width === 1024) {
+          const title = page.getByTestId("document-card").getByRole("heading", { name: "Library width check" });
+          expect((await title.boundingBox())!.width, "document title remains readable with the widest sidebar").toBeGreaterThan(120);
+        }
       }
       await page.keyboard.press("Enter");
       await expect(sidebar(page)).toHaveCSS("width", "256px");

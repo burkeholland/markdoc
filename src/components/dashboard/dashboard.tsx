@@ -1611,7 +1611,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         </header>
 
         <div className="flex items-start">
-          <div className="sticky top-16 hidden h-[calc(100vh-4rem)] shrink-0 md:block" style={{ width: sidebarWidth }}>
+          <div className="sticky top-[calc(4rem+1px)] hidden h-[calc(100dvh-4rem-1px)] shrink-0 md:block" style={{ width: sidebarWidth }}>
             <aside
               id="library-sidebar"
               className="h-full overflow-y-auto border-r border-line bg-surface px-3 py-4"
@@ -1794,8 +1794,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
           ) : (
-            <div className="overflow-hidden rounded-xl border border-line bg-surface">
-              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 lg:flex" aria-hidden="true">
+            <div className="@container/library-list overflow-hidden rounded-xl border border-line bg-surface">
+              <div className="hidden items-center gap-3 border-b border-line bg-surface-2 py-2 pl-3 pr-24 text-xs font-medium text-ink-3 @min-[52rem]/library-list:flex" aria-hidden="true">
                 <span className="w-6 shrink-0" />
                 <span className="w-9 shrink-0" />
                 <span className="min-w-0 flex-1">Name</span>
@@ -1900,7 +1900,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                       ) : (
                         <span className="hidden truncate text-[13px] text-ink-3 md:block">{d.excerpt || "Empty document"}</span>
                       )}
-                      <span className="flex items-center gap-1.5 text-xs text-ink-3 lg:hidden">
+                      <span className="flex items-center gap-1.5 text-xs text-ink-3 @min-[52rem]/library-list:hidden">
                         {folder ? <FolderIcon size={12} className="shrink-0" /> : <Inbox size={12} className="shrink-0" />}
                         <span className="truncate">{folder?.name ?? "No folder"}</span>
                         <span aria-hidden="true">·</span>
@@ -1908,7 +1908,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         {d.ownerId !== user.id && <span className="truncate">· {d.ownerName ?? d.ownerLogin}</span>}
                       </span>
                     </span>
-                    <span className="hidden w-40 shrink-0 lg:block">
+                    <span className="hidden w-40 shrink-0 @min-[52rem]/library-list:block">
                       {folder && (
                         <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-xs text-ink-2">
                           <FolderIcon size={12} className="shrink-0" />
@@ -1916,10 +1916,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         </span>
                       )}
                     </span>
-                    <span className="hidden w-16 shrink-0 lg:block">
+                    <span className="hidden w-16 shrink-0 @min-[52rem]/library-list:block">
                       <Avatar name={d.ownerName ?? d.ownerLogin ?? "Owner"} size={24} alt={d.ownerId === user.id ? "You" : `Owner ${d.ownerName ?? d.ownerLogin}`} />
                     </span>
-                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 lg:block">
+                    <span className="hidden w-24 shrink-0 text-xs text-ink-3 @min-[52rem]/library-list:block">
                       {sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix={sort === "recent" ? "Edited " : undefined} />}
                     </span>
                   </Link>

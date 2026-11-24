@@ -60,8 +60,8 @@ test.describe("dashboard notification strip with real input", () => {
   const belowStrip = (page: Page) => page.getByTestId("library-title");
   /** The first control after the strip on a desktop screen, now that "New document" lives in the sidebar before it. */
   const afterStrip = (page: Page) => page.getByTestId("open-file");
-  /** The last control before the strip: the end of the library sidebar. */
-  const beforeStrip = (page: Page) => page.getByTestId("library-sidebar").locator("a:visible, button:visible, input:visible, select:visible").last();
+  /** The last control before the strip: the sidebar's resize separator. */
+  const beforeStrip = (page: Page) => page.getByRole("separator", { name: "Resize Library sidebar" });
   /** Presses Tab until the target has focus, as a keyboard user would reach it. */
   const tabTo = async (target: Locator) => {
     for (let presses = 0; presses < 60; presses += 1) {
@@ -252,6 +252,7 @@ test.describe("dashboard notification strip with real input", () => {
       await page.keyboard.press(next);
       await expect(next === "Tab" ? afterStrip(page) : beforeStrip(page)).toBeFocused();
       await expect(status).toHaveCount(0);
+      await expect.poll(unreadCount).toBe(0);
     };
 
     await shareNew(1);
