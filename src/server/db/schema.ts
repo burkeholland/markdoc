@@ -2,6 +2,7 @@ import {
   pgTable,
   text,
   timestamp,
+  date,
   integer,
   primaryKey,
   boolean,
@@ -37,6 +38,8 @@ export const users = pgTable("user", {
   image: text("image"),
   /** GitHub login (handle). Used for sharing by handle. */
   login: text("login"),
+  /** When the account was created. Older rows are backfilled from their earliest document, folder or token (or stay null). */
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow(),
 });
 
 export const accounts = pgTable(
@@ -289,6 +292,24 @@ export const recents = pgTable(
     openedAt: timestamp("opened_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.documentId] }), index("recent_user_opened_idx").on(t.userId, t.openedAt.desc())],
+);
+
+export type UsageKind = "open" | "edit" | "agent";
+
+/**
+ * One row per signed-in user, UTC day and kind of use (opened a document, edited one, used an agent token),
+ * so active-user counts survive later visits. Holds no document ids or content.
+ */
+export const dailyUsage = pgTable(
+  "daily_usage",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    day: date("day", { mode: "string" }).notNull(),
+    kind: text("kind").$type<UsageKind>().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.day, t.kind] }), index("daily_usage_day_idx").on(t.day)],
 );
 
 /** Personal access tokens so agents and scripts can act on a user's behalf. Only a hash is stored. */

@@ -22,6 +22,7 @@ import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
 import { Pace } from "@/server/pace";
+import { noteUsage } from "@/server/usage";
 import {
   collabConnectionOpened,
   collabMessageBegins,
@@ -226,6 +227,7 @@ export function createCollabServer() {
         const stored = await pace.step(() => (db as NodePgDatabase<typeof schema>).update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning({ id: schema.documents.id }));
         if (stored.length !== 1) throw new Error("Document no longer exists");
         await maybeAutoVersion(documentName, content, lastContext ?? null, pace);
+        if (lastContext?.userId) noteUsage(lastContext.userId, "edit");
       } catch {
         // Hocuspocus logs hook messages; keep database and document details out of that diagnostic.
         throw new Error("Document persistence failed");

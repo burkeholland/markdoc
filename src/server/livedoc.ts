@@ -12,6 +12,7 @@ import { HttpError } from "@/server/http";
 import { noteContentWrite, rememberCleanText, cachedCleanText, unifiedDiff, type WriterRef } from "@/server/agent-events";
 import { contentHash } from "@/server/export/html";
 import type { AgentActivity } from "@/server/agents";
+import { noteUsage } from "@/server/usage";
 
 /** The longest text a write through the API may leave in a document, in characters (`PUT` and `PATCH /content`). */
 export const MAX_TEXT_CHARS = 2_000_000;
@@ -228,6 +229,7 @@ export async function mutateLiveDoc(docId: string, ctx: CollabContext, fn: (doc:
       .update(schema.documents)
       .set({ ystate: Y.encodeStateAsUpdate(doc), content: doc.getText(TEXT_KEY).toString(), updatedAt: new Date(), lastEditedBy: ctx.userId })
       .where(eq(schema.documents.id, docId));
+    noteUsage(ctx.userId, "edit");
   } finally {
     doc.destroy();
   }
