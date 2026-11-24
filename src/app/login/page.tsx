@@ -101,7 +101,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
           </form>
         )}
         <p className="mt-6 text-center text-xs text-ink-4">Markdoc asks for access to your gists and repositories so it can publish documents on your behalf.</p>
-        <Link href="/" className="mt-4 block text-center text-sm text-accent hover:underline" data-testid="login-home">
+        <Link href="/" className="mt-4 flex min-h-11 items-center justify-center text-center text-sm text-accent hover:underline" data-testid="login-home">
           Back to homepage
         </Link>
       </div>
