@@ -1,4 +1,4 @@
-import { diffWords, diffLines, type Change } from "diff";
+import { diffWords, type Change } from "diff";
 
 export interface DiffStats {
   added: number;
@@ -8,10 +8,6 @@ export interface DiffStats {
 /** Word-level diff for rendering (old → new). */
 export function wordDiff(oldText: string, newText: string): Change[] {
   return diffWords(oldText, newText);
-}
-
-export function lineDiff(oldText: string, newText: string): Change[] {
-  return diffLines(oldText, newText);
 }
 
 export function diffStats(changes: Change[]): DiffStats {
@@ -150,4 +146,3 @@ export function hunkCounter(active: number, total: number): string {
   if (total === 0) return "No changes";
   return `${Math.min(active, total - 1) + 1} of ${total} ${total === 1 ? "change" : "changes"}`;
 }
-

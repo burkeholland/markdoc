@@ -33,11 +33,6 @@ export function useBreakpoint(): Breakpoint {
   return phone ? "phone" : tablet ? "tablet" : "desktop";
 }
 
-/** Touch-first devices (phones, tablets) where the OS draws its own selection toolbar. */
-export function useCoarsePointer(): boolean {
-  return useMediaQuery("(pointer: coarse)");
-}
-
 export function isCoarsePointer(): boolean {
   return typeof window !== "undefined" && !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
 }

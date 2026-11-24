@@ -191,7 +191,6 @@ const link = (n: number, topic: string) => `[${topic.toLowerCase()} notes](https
 /** Placeholder image URL; `seedBurkeScale` uploads a real PNG per image and rewrites it. */
 export const imagePlaceholder = (k: number) => `/api/assets/__burke_img_${k}__`;
 export const IMAGE_PLACEHOLDER_RE = /\/api\/assets\/__burke_img_(\d+)__/g;
-export const IMAGE_COUNT = 8;
 
 // ---------------------------------------------------------------------------------------------
 // The long document.

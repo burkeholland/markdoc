@@ -48,15 +48,6 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role, em
   return session;
 }
 
-/** Subscribe a component to session changes. Returns a version counter that changes on every update. */
-export function useSessionVersion(session: CollabSession): number {
-  return useSyncExternalStore(
-    session.subscribe,
-    () => session.version,
-    () => session.version,
-  );
-}
-
 /** Shallow equality for plain objects and arrays of primitives. */
 export function shallowEqual(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
