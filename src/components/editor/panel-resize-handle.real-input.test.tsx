@@ -2,14 +2,15 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PANEL_BIG_STEP, PANEL_DEFAULT, PANEL_STEP, PanelResizeHandle } from "./panel-resize-handle";
+import { PANEL_BIG_STEP, PANEL_DEFAULT, PANEL_STEP, PanelResizeHandle, type PanelResizeHandleProps } from "./panel-resize-handle";
 
 afterEach(cleanup);
 
-function Harness({ onResize, onReset }: { onResize?: (w: number) => void; onReset?: () => void }) {
+function Harness({ onResize, onReset, side }: { onResize?: (w: number) => void; onReset?: () => void; side?: PanelResizeHandleProps["side"] }) {
   const [width, setWidth] = useState(400);
   return (
     <PanelResizeHandle
+      side={side}
       width={width}
       min={280}
       max={720}
@@ -20,6 +21,19 @@ function Harness({ onResize, onReset }: { onResize?: (w: number) => void; onRese
 }
 
 describe("PanelResizeHandle real input", () => {
+  it("moves a left sidebar's edge with the pointer and arrow keys", () => {
+    const onResize = vi.fn();
+    render(<Harness side="left" onResize={onResize} />);
+    const handle = screen.getByRole("separator");
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 0, clientX: 400 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 450 });
+    expect(onResize).toHaveBeenLastCalledWith(450);
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(onResize).toHaveBeenLastCalledWith(450 + PANEL_STEP);
+    fireEvent.keyDown(handle, { key: "ArrowLeft", shiftKey: true });
+    expect(onResize).toHaveBeenLastCalledWith(450 + PANEL_STEP - PANEL_BIG_STEP);
+  });
   it("honors synthetic keyboard events", () => {
     const onResize = vi.fn();
     const onReset = vi.fn();

@@ -21,7 +21,7 @@ export const PANEL_STEP = 16;
 export const PANEL_BIG_STEP = 64;
 
 const HANDLE_CLASS =
-  "group/handle absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none select-none outline-none";
+  "group/handle absolute inset-y-0 z-10 w-2 cursor-col-resize touch-none select-none outline-none";
 const LINE_CLASS =
   "absolute inset-y-0 left-1/2 w-px bg-line transition-[width,background-color] duration-100 group-hover/handle:w-0.5 group-hover/handle:bg-accent group-focus-visible/handle:w-0.5 group-focus-visible/handle:bg-accent";
 
@@ -40,6 +40,9 @@ export function parseStoredPanelWidth(raw: string | null | undefined): number | 
   return Number(raw.trim());
 }
 export interface PanelResizeHandleProps {
+  side?: "left" | "right";
+  label?: string;
+  controls?: string;
   width: number;
   min: number;
   max: number;
@@ -48,6 +51,7 @@ export interface PanelResizeHandleProps {
 }
 
 interface Drag {
+  direction: number;
   pointerId: number;
   startX: number;
   startWidth: number;
@@ -70,11 +74,14 @@ function restoreBody(drag: Drag) {
 }
 
 /**
- * Thin vertical grip laid over the side panel's left border. Dragging it left widens the panel
- * (the panel sits on the right, so its left edge moves with the pointer); arrow keys nudge it,
+ * Thin vertical grip laid over the side panel's inner border. Moving the edge away from the
+ * window's edge widens the panel; arrow keys nudge it,
  * Home/End jump to the limits and Enter or a double-click puts the default width back.
  */
 export function PanelResizeHandle({
+  side = "right",
+  label = "Resize panel",
+  controls,
   width,
   min,
   max,
@@ -116,6 +123,7 @@ export function PanelResizeHandle({
     const target = event.currentTarget;
     const body = target.ownerDocument.body;
     const drag: Drag = {
+      direction: side === "left" ? 1 : -1,
       pointerId: event.pointerId,
       startX: event.clientX,
       startWidth: width,
@@ -142,7 +150,7 @@ export function PanelResizeHandle({
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || event.pointerId !== drag.pointerId) return;
-    drag.onResize(clampPanelWidth(drag.startWidth + (drag.startX - event.clientX), drag.min, drag.max));
+    drag.onResize(clampPanelWidth(drag.startWidth + (event.clientX - drag.startX) * drag.direction, drag.min, drag.max));
   };
 
   const onPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -162,7 +170,8 @@ export function PanelResizeHandle({
     if (key === "Home") next = min;
     else if (key === "End") next = max;
     else if (key === "ArrowLeft" || key === "ArrowRight") {
-      next = width + (key === "ArrowLeft" ? 1 : -1) * (event.shiftKey ? PANEL_BIG_STEP : PANEL_STEP);
+      const direction = side === "left" ? 1 : -1;
+      next = width + (key === "ArrowRight" ? direction : -direction) * (event.shiftKey ? PANEL_BIG_STEP : PANEL_STEP);
     } else return;
     event.preventDefault();
     onResize(clampPanelWidth(next, min, max));
@@ -178,7 +187,8 @@ export function PanelResizeHandle({
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize panel"
+      aria-label={label}
+      aria-controls={controls}
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={width}
@@ -186,7 +196,7 @@ export function PanelResizeHandle({
       tabIndex={0}
       data-testid="panel-resize-handle"
       data-dragging={dragging || undefined}
-      className={HANDLE_CLASS}
+      className={cn(HANDLE_CLASS, side === "left" ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2")}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerEnd}
