@@ -87,3 +87,42 @@ test("homepage offers a next step after the features on phones", async ({ page }
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   await expect(nextStep).toBeInViewport();
 });
+
+for (const action of [
+  { name: "primary CTA", width: 768, height: 1024, selector: 'main a[href="/login"]', index: 0, keyboard: false },
+  { name: "phone header", width: 390, height: 844, selector: 'header a[href="/login"]', index: 0, keyboard: true },
+  { name: "bottom CTA", width: 390, height: 844, selector: 'main a[href="/login"]', index: 1, keyboard: false },
+]) {
+  test(`${action.name} shows pending feedback until sign-in opens`, async ({ page }) => {
+    await page.setViewportSize({ width: action.width, height: action.height });
+    await page.goto("/");
+    const link = page.locator(action.selector).nth(action.index);
+    const status = link.getByRole("status");
+    await expect(status).toBeEmpty();
+
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/login**", async (route) => {
+      await blocked;
+      await route.continue();
+    });
+
+    try {
+      if (action.keyboard) {
+        await link.focus();
+        await page.keyboard.press("Enter");
+      } else {
+        await link.click();
+      }
+      await expect(status).toHaveText("Opening sign-in…");
+      await expect(link.locator('[aria-hidden="true"]', { hasText: "Opening sign-in…" })).toBeVisible();
+      await expect(page).toHaveURL("/");
+    } finally {
+      release();
+    }
+
+    await expect(page).toHaveURL(/\/login/);
+    await page.goBack();
+    await expect(status).toBeEmpty();
+  });
+}
