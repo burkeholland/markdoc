@@ -117,8 +117,11 @@ export async function seedMigrationFixture(source: PGlite): Promise<void> {
 }
 
 export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Promise<void> {
-  // Newest migration first: 0028 adds folder notifications; 0027 adds folder collaborators; 0026 adds the video cleanup outbox;
-  // 0025 adds stream slots; 0024 adds video uploads and external-storage metadata to assets.
+  // Newest migration first: 0029 adds daily usage and user.created_at; 0028 adds folder notifications; 0027 adds folder
+  // collaborators; 0026 adds the video cleanup outbox; 0025 adds stream slots; 0024 adds video uploads and external-storage
+  // metadata to assets.
+  await source.query(`DROP TABLE daily_usage`);
+  await source.query(`ALTER TABLE "user" DROP COLUMN created_at`);
   await source.query(`DROP TABLE folder_notification`);
   await source.query(`DROP TABLE folder_collaborator`);
   await source.query(`DROP TABLE video_storage_cleanup`);

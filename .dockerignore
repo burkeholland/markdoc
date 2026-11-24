@@ -14,6 +14,7 @@ scripts/*.mts
 # maintenance CLIs run from the markdoc-maint job image (Dockerfile --target build)
 !scripts/repair-github-identity.mts
 !scripts/transfer-legacy-ownership.mts
+!scripts/usage-report.mts
 *.md
 !README.md
 .next-e2e

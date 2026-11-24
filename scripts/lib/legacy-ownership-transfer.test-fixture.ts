@@ -20,6 +20,7 @@ export const FIXTURE_TABLES = [
   "api_token",
   "asset",
   "collaborator",
+  "daily_usage",
   "document",
   "folder",
   "folder_collaborator",
@@ -55,6 +56,8 @@ export const FIXTURE_EXPECTED_DRY_RUN: Record<(typeof TRANSFER_COUNT_LABELS)[num
   "star.user_id deduplicated": 1,
   "recent.user_id moved": 1,
   "recent.user_id deduplicated": 1,
+  "daily_usage.user_id moved": 1,
+  "daily_usage.user_id deduplicated": 1,
   "api_token.user_id moved": 1,
   "asset.user_id moved": 1,
   "video_upload.user_id moved": 1,
@@ -128,6 +131,7 @@ export async function seedLegacyOwnershipFixture(q: FixtureQuery): Promise<void>
 
   await q(`INSERT INTO star (document_id, user_id) VALUES ('doc-a', $1), ('doc-t1', $1), ('doc-t1', $2), ('doc-o1', $3)`, [sourceId, targetId, otherId]);
   await q(`INSERT INTO recent (user_id, document_id, opened_at) VALUES ($1, 'doc-t1', now() - interval '2 days'), ($2, 'doc-t1', now() - interval '1 day'), ($1, 'doc-b', now()), ($3, 'doc-o1', now())`, [sourceId, targetId, otherId]);
+  await q(`INSERT INTO daily_usage (user_id, day, kind) VALUES ($1, '2026-03-01', 'open'), ($2, '2026-03-01', 'open'), ($1, '2026-03-02', 'edit'), ($3, '2026-03-01', 'open')`, [sourceId, targetId, otherId]);
 
   await q(`INSERT INTO api_token (id, user_id, name, mention_slug, prefix, token_hash) VALUES ('tok-legacy', $1, 'Copilot', 'copilot', 'mk_l', 'hash-legacy'), ('tok-target', $2, 'Reviewer', 'reviewer', 'mk_t', 'hash-target')`, [sourceId, targetId]);
   await q(`INSERT INTO asset (id, document_id, user_id, name, mime, size, sha256, data) VALUES ('asset-legacy', 'doc-a', $1, 'a.png', 'image/png', 1, 'sha-a', $3), ('asset-target', 'doc-t1', $2, 't.png', 'image/png', 1, 'sha-t', $3)`, [sourceId, targetId, Buffer.from([1])]);
