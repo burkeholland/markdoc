@@ -81,13 +81,14 @@
 .segment b { background: var(--p-surface-3); color: var(--p-ink); }
 .editorBody { display: grid; grid-template-columns: 1fr 1fr; min-height: 540px; }
 .editorBody > *, .preview > *, .hero > *, .row > * { min-width: 0; }
-.source { font: 13.5px/24px var(--font-mono); padding-block: 22px; border-right: 1px solid var(--p-line); color: var(--cm-ink); white-space: pre; overflow: hidden; }
+.source { font: 13.5px/24px var(--font-mono); padding-block: 22px; border-right: 1px solid var(--p-line); color: var(--cm-ink); white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; }
+.source > div { position: relative; padding-left: 48px; }
 .source strong { font-weight: 500; color: var(--cm-strong); }
-.lineNumber { display: inline-block; width: 48px; padding-right: 18px; text-align: right; color: var(--cm-faint); user-select: none; }
+.lineNumber { position: absolute; left: 0; width: 48px; padding-right: 18px; text-align: right; color: var(--cm-faint); user-select: none; }
 .punctuation { color: var(--cm-muted); }
 .code { color: var(--cm-code); }
 .caret { display: inline-block; position: relative; width: 2px; height: 19px; vertical-align: -4px; background: var(--person-color); margin-inline: -1px; }
-.caret i { position: absolute; bottom: 100%; left: -1px; background: var(--person-color); color: #fff; font: 600 10.5px/1 var(--font-sans); padding: 3px 5px; border-radius: 3px 3px 3px 0; font-style: normal; }
+.caret i { position: absolute; bottom: 100%; right: -1px; background: var(--person-color); color: #fff; font: 600 10.5px/1 var(--font-sans); padding: 3px 5px; border-radius: 3px 3px 0 3px; font-style: normal; white-space: nowrap; }
 .selection { background: color-mix(in srgb, #7c3aed 18%, transparent); }
 .preview { background: var(--p-paper); display: grid; grid-template-columns: minmax(0, 1fr) 250px; }
 .document { padding: 34px 44px; font: 15.5px/1.65 var(--font-instrument-sans), sans-serif; }
