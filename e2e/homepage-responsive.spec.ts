@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { cssPx } from "./helpers";
+import { cssPx, waitForHydration } from "./helpers";
 import AxeBuilder from "@axe-core/playwright";
 
 test("homepage exposes its header as a banner landmark separate from main", async ({ page }) => {
@@ -97,6 +97,8 @@ for (const action of [
   test(`${action.name} shows pending feedback until sign-in opens`, async ({ page }) => {
     await page.setViewportSize({ width: action.width, height: action.height });
     await page.goto("/");
+    // A click before hydration is a plain link, with no pending state to show.
+    await waitForHydration(page);
     const link = page.locator(action.selector).nth(action.index);
     const status = link.getByRole("status");
     await expect(status).toBeEmpty();
