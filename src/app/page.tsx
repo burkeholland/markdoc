@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { auth, githubConfigured } from "@/auth";
 import { Wordmark } from "@/components/ui/logo";
 import { GitHubIcon } from "@/components/ui/github-icon";
+import { SignInLinkContent } from "@/components/ui/sign-in-link-content";
 import { Dashboard } from "@/components/dashboard/dashboard";
 import { getGitHubToken, listDocumentsForUser } from "@/server/documents";
 import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, isDashboardSort } from "@/lib/dashboard-sort";
@@ -50,9 +51,11 @@ function Landing() {
       <header className="app-header landing-header mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Wordmark />
         <Link href="/login" className="btn btn-primary h-11 gap-2">
-          <GitHubIcon size={16} />
-          <span className="sm:hidden">Sign in</span>
-          <span className="hidden sm:inline">Sign in with GitHub</span>
+          <SignInLinkContent>
+            <GitHubIcon size={16} />
+            <span className="sm:hidden">Sign in</span>
+            <span className="hidden sm:inline">Sign in with GitHub</span>
+          </SignInLinkContent>
         </Link>
       </header>
       <main>
@@ -66,7 +69,7 @@ function Landing() {
             </p>
             <div className="landing-actions mt-8 flex flex-wrap items-center gap-3">
               <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
-                Get started <ArrowRight size={18} />
+                <SignInLinkContent>Get started <ArrowRight size={18} /></SignInLinkContent>
               </Link>
               <span className="text-sm text-ink-3">Free while in preview · GitHub account required</span>
             </div>
@@ -93,7 +96,7 @@ function Landing() {
           </div>
           <div className="mt-8 flex justify-center">
             <Link href="/login" className="btn btn-primary h-11 gap-2 px-5 text-base">
-              Get started <ArrowRight size={18} />
+              <SignInLinkContent>Get started <ArrowRight size={18} /></SignInLinkContent>
             </Link>
           </div>
         </section>
