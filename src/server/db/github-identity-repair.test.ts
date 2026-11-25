@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 27, userForeignKeys: 12 },
+        schema: { tables: 28, userForeignKeys: 13 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -270,6 +270,12 @@ describe("GitHub identity repair", () => {
           insert: `INSERT INTO recent (user_id, document_id) VALUES ($1, 'legacy-document')`,
           values: [DUPLICATE_ID],
           cleanup: `DELETE FROM recent WHERE document_id = 'legacy-document'`,
+        },
+        {
+          label: "daily_usage.user_id",
+          insert: `INSERT INTO daily_usage (user_id, day, kind) VALUES ($1, '2026-09-01', 'open')`,
+          values: [DUPLICATE_ID],
+          cleanup: `DELETE FROM daily_usage WHERE user_id = '${DUPLICATE_ID}'`,
         },
         {
           label: "api_token.user_id",
@@ -713,6 +719,11 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
   await database.query(
     `INSERT INTO recent (user_id, document_id)
      VALUES ($1, 'preserved-document')`,
+    [LEGACY_ID],
+  );
+  await database.query(
+    `INSERT INTO daily_usage (user_id, day, kind)
+     VALUES ($1, '2026-09-01', 'open')`,
     [LEGACY_ID],
   );
   await database.query(

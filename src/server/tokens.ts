@@ -5,6 +5,7 @@ import { getDb, schema, type Db, type Tx } from "@/server/db";
 import type { TokenScope } from "@/server/db/schema";
 import type { SessionUser } from "@/server/documents";
 import { agentMentionSlug } from "@/editor/collab/mentions";
+import { noteUsage } from "@/server/usage";
 
 const TOKEN_PREFIX = "mdk_";
 const newId = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
@@ -348,7 +349,8 @@ async function writeLastUsed(tokenId: string): Promise<void> {
   await db.update(schema.apiTokens).set({ lastUsedAt: new Date() }).where(eq(schema.apiTokens.id, tokenId));
 }
 
-function noteTokenUse(tokenId: string): void {
+function noteTokenUse(tokenId: string, userId: string): void {
+  noteUsage(userId, "agent");
   const last = lastUsedWrites.get(tokenId) ?? 0;
   if (Date.now() - last <= 60_000) return;
   lastUsedWrites.set(tokenId, Date.now());
@@ -365,7 +367,7 @@ export async function resolveApiToken(token: string, options: { recordUse?: bool
     .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
     .where(eq(schema.apiTokens.tokenHash, hashToken(token)));
   const actor = row ? resolvedActor(row) : null;
-  if (actor && options.recordUse !== false) noteTokenUse(actor.tokenId);
+  if (actor && options.recordUse !== false) noteTokenUse(actor.tokenId, actor.id);
   return actor;
 }
 
@@ -378,7 +380,7 @@ export async function resolveApiTokenById(tokenId: string): Promise<TokenActor |
     .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
     .where(eq(schema.apiTokens.id, tokenId));
   const actor = row ? resolvedActor(row) : null;
-  if (actor) noteTokenUse(actor.tokenId);
+  if (actor) noteTokenUse(actor.tokenId, actor.id);
   return actor;
 }
 

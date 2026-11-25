@@ -37,6 +37,7 @@ const expectedTables = [
   "api_token",
   "asset",
   "collaborator",
+  "daily_usage",
   "document",
   "folder",
   "folder_collaborator",
@@ -112,7 +113,7 @@ describe("PGlite to PostgreSQL migration", () => {
       expect(manifest.tables.gist_auto_update.rows).toBe(0);
       expect(manifest.records.assets).toMatchObject({ count: 2, bytes: 1_048_579 });
       expect(manifest.schema.source).toMatchObject({ count: 15, latestCreatedAt: "1787795284192" });
-      expect(manifest.schema.target).toMatchObject({ count: 29, latestCreatedAt: "1794267848289" });
+      expect(manifest.schema.target).toMatchObject({ count: 30, latestCreatedAt: "1795545962182" });
       expect(JSON.stringify(manifest)).not.toContain("account-access-value");
       expect(JSON.stringify(manifest)).not.toContain("https://fixture.invalid/hook");
       expect(JSON.stringify(manifest)).not.toContain("Unicode");

@@ -7,6 +7,7 @@ import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
 import { excerptOf, excerptOfPrefix } from "@/editor/stats";
 import { plainTextFromMarkdown } from "@/editor/markdown/mdast";
+import { recordUsage } from "@/server/usage";
 import {
   copyVideoBlob,
   deleteVideoStorageForDocument,
@@ -343,13 +344,17 @@ export async function isStarred(userId: string, docId: string): Promise<boolean>
   return row?.starred === true;
 }
 
-/** Remember that the user opened the document just now (upsert; one row per user and document). */
+/**
+ * Remember that the user opened the document just now (upsert; one row per user and document), and count
+ * them active today: the recents row is overwritten on the next open, so it cannot tell past usage.
+ */
 export async function recordDocumentOpen(userId: string, docId: string, at = new Date()): Promise<void> {
   const db = await getDb();
   await db
     .insert(schema.recents)
     .values({ userId, documentId: docId, openedAt: at })
     .onConflictDoUpdate({ target: [schema.recents.userId, schema.recents.documentId], set: { openedAt: at } });
+  await recordUsage(userId, "open", at);
 }
 
 export interface SearchResult extends DocumentSummary {

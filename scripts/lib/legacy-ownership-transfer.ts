@@ -33,6 +33,7 @@ export const TRANSFER_USER_FOREIGN_KEYS = [
   "agent_request.user_id",
   "api_token.user_id",
   "asset.user_id",
+  "daily_usage.user_id",
   "document.owner_id",
   "folder.owner_id",
   "recent.user_id",
@@ -80,6 +81,8 @@ export const TRANSFER_COUNT_LABELS = [
   "star.user_id deduplicated",
   "recent.user_id moved",
   "recent.user_id deduplicated",
+  "daily_usage.user_id moved",
+  "daily_usage.user_id deduplicated",
   "api_token.user_id moved",
   "asset.user_id moved",
   "video_upload.user_id moved",
@@ -228,6 +231,8 @@ interface UserRow extends Row {
   email_verified: string | null;
   image: string | null;
   login: string | null;
+  /** Absent in rollback records written before `user.created_at` existed; restored as null then. */
+  created_at?: string | null;
 }
 
 interface Selection {
@@ -291,7 +296,7 @@ interface RollbackRecord {
 
 const TRANSFER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-const USER_SELECT = `SELECT id, name, email, "emailVerified"::text AS email_verified, image, login FROM "user"`;
+const USER_SELECT = `SELECT id, name, email, "emailVerified"::text AS email_verified, image, login, created_at::text AS created_at FROM "user"`;
 
 export function normalizeTransferId(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -690,6 +695,16 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     if (duplicate) add({ kind: "delete", table: "recent", key: { user_id: source.id, document_id: documentId }, row, label: "recent.user_id deduplicated" });
     else update("recent", { user_id: source.id, document_id: documentId }, "user_id", source.id, target.id, "recent.user_id moved");
   }
+  // (user, day, kind) usage rows: the target being active that day already counts the day once.
+  const usage = await client.query<{ row: Row; day: string; kind: string }>(
+    `SELECT to_jsonb(u) AS row, u.day::text AS day, u.kind FROM daily_usage u WHERE u.user_id = $1 ORDER BY u.day, u.kind`,
+    [source.id],
+  );
+  for (const { row, day, kind } of usage.rows) {
+    const duplicate = await countWhere(client, `SELECT COUNT(*)::text AS count FROM daily_usage WHERE user_id = $1 AND day = $2::date AND kind = $3`, [target.id, day, kind]);
+    if (duplicate) add({ kind: "delete", table: "daily_usage", key: { user_id: source.id, day, kind }, row, label: "daily_usage.user_id deduplicated" });
+    else update("daily_usage", { user_id: source.id, day, kind }, "user_id", source.id, target.id, "daily_usage.user_id moved");
+  }
 
   // Login-keyed rows follow the login. When both users share a login nothing needs to move.
   const deletedCollaborators = new Set<string>();
@@ -986,9 +1001,9 @@ async function restoreFromRecord(client: LegacyOwnershipTransferQueryClient, rec
   const user = record.sourceUser;
   await expectRows(
     client,
-    `INSERT INTO "user" (id, name, email, "emailVerified", image, login)
-     VALUES ($1, $2, $3, $4::timestamptz, $5, $6) RETURNING id`,
-    [user.id, user.name, user.email, user.email_verified, user.image, user.login],
+    `INSERT INTO "user" (id, name, email, "emailVerified", image, login, created_at)
+     VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7::timestamptz) RETURNING id`,
+    [user.id, user.name, user.email, user.email_verified, user.image, user.login, user.created_at ?? null],
     1,
   );
   for (const entry of [...record.entries].reverse()) {
@@ -1046,6 +1061,7 @@ async function countResidualReferences(
     `SELECT COUNT(*) FROM version WHERE created_by = $1`,
     `SELECT COUNT(*) FROM star WHERE user_id = $1`,
     `SELECT COUNT(*) FROM recent WHERE user_id = $1`,
+    `SELECT COUNT(*) FROM daily_usage WHERE user_id = $1`,
     `SELECT COUNT(*) FROM api_token WHERE user_id = $1`,
     `SELECT COUNT(*) FROM asset WHERE user_id = $1`,
     `SELECT COUNT(*) FROM video_upload WHERE user_id = $1`,
@@ -1162,7 +1178,8 @@ function isUserRow(value: unknown): value is UserRow {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
-    ["name", "email", "email_verified", "image", "login"].every((key) => value[key] === null || typeof value[key] === "string")
+    ["name", "email", "email_verified", "image", "login"].every((key) => value[key] === null || typeof value[key] === "string") &&
+    (value.created_at === undefined || value.created_at === null || typeof value.created_at === "string")
   );
 }
 

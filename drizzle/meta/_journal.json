@@ -204,6 +204,13 @@
       "when": 1794267848289,
       "tag": "0028_folder_link_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1795545962182,
+      "tag": "0029_daily_usage",
+      "breakpoints": true
     }
   ]
 }

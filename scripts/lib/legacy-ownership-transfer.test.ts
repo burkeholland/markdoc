@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
+        schema: { userForeignKeys: 13, softUserReferences: 5, loginReferences: 8, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,
@@ -123,6 +123,7 @@ describe("legacy ownership transfer", () => {
            (SELECT COUNT(*) FROM folder_collaborator WHERE added_by = $1 OR lower(login) = $2) +
            (SELECT COUNT(*) FROM star WHERE user_id = $1) +
            (SELECT COUNT(*) FROM recent WHERE user_id = $1) +
+           (SELECT COUNT(*) FROM daily_usage WHERE user_id = $1) +
            (SELECT COUNT(*) FROM api_token WHERE user_id = $1) +
            (SELECT COUNT(*) FROM asset WHERE user_id = $1) +
            (SELECT COUNT(*) FROM video_upload WHERE user_id = $1) +

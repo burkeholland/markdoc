@@ -13,6 +13,7 @@
     "start:local": "cross-env NODE_ENV=production MARKDOC_PRODUCTION_PGLITE=local-rehearsal-only PORT=3900 PGLITE_DATA_DIR=.data/pglite-prod-smoke AUTH_SECRET=local-production-smoke-secret-not-for-real-use AUTH_DEV_LOGIN=force node dist/server.mjs",
     "smoke": "tsx scripts/smoke.mts",
     "seed:burke-scale": "tsx scripts/seed-burke-scale.mts",
+    "usage:report": "tsx scripts/usage-report.mts",
     "soak:collab": "tsx scripts/collab-soak.mts",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",

@@ -22,6 +22,7 @@ import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
 import { Pace } from "@/server/pace";
+import { noteUsage } from "@/server/usage";
 import {
   collabConnectionOpened,
   collabMessageBegins,
@@ -188,6 +189,8 @@ export function createCollabServer() {
     },
 
     async onChange({ document, documentName, context }: onChangePayload<CollabContext>) {
+      // Every contributor of a coalesced autosave is noted here, not only the last writer at store time.
+      if (context?.userId) noteUsage(context.userId, "edit");
       const seed = freshlySeeded.get(documentName);
       if (seed === undefined) return;
       // Only the first change after seeding can be the mirror artefact; anything later is an edit.
