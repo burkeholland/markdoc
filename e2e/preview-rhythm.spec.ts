@@ -131,8 +131,29 @@ const LIST_CODE_DOC = [
   "",
 ].join("\n");
 
+const TIGHT_LIST_CODE_DOC = [
+  "1. Plain text:",
+  "   ```text",
+  "   Plain tight code",
+  "   ```",
+  "2. Next item",
+  "",
+  "- Compact **text**:",
+  "  ```text",
+  "  Formatted tight code",
+  "  ```",
+  "- ```text",
+  "  First block",
+  "  ```",
+  "- [ ] Task text:",
+  "  ```text",
+  "  Task tight code",
+  "  ```",
+  "",
+].join("\n");
+
 for (const width of [1600, 390]) {
-  test(`code blocks inside lists leave paragraph space below them (${width}px)`, async ({ browser }, testInfo) => {
+  test(`code blocks inside lists have equal paragraph space above and below (${width}px)`, async ({ browser }, testInfo) => {
     const owner = await signIn(browser, `list-code-${width}`);
     const page = owner.page;
     const id = await createDocument(page, LIST_CODE_DOC, "Code block spacing");
@@ -143,14 +164,20 @@ for (const width of [1600, 390]) {
       await expect(target.locator(`${root} li pre + p`)).toHaveCount(3);
       await target.screenshot({ path: testInfo.outputPath(`${label}.png`), fullPage: true });
       const gaps = await target.locator(`${root} li pre + p`).evaluateAll((paragraphs) =>
-        paragraphs.map((p) => ({
-          text: p.textContent,
-          gap: p.getBoundingClientRect().top - p.previousElementSibling!.getBoundingClientRect().bottom,
-        })),
+        paragraphs.map((p) => {
+          const code = p.previousElementSibling!;
+          const before = code.previousElementSibling!;
+          return {
+            text: p.textContent,
+            above: code.getBoundingClientRect().top - before.getBoundingClientRect().bottom,
+            below: p.getBoundingClientRect().top - code.getBoundingClientRect().bottom,
+          };
+        }),
       );
-      for (const { text, gap } of gaps) {
-        expect.soft(gap, `${label}: ${text}`).toBeGreaterThanOrEqual(BLOCK.min);
-        expect.soft(gap, `${label}: ${text}`).toBeLessThanOrEqual(BLOCK.max);
+      for (const { text, above, below } of gaps) {
+        expect.soft(below, `${label}: ${text} below`).toBeGreaterThanOrEqual(BLOCK.min);
+        expect.soft(below, `${label}: ${text} below`).toBeLessThanOrEqual(BLOCK.max);
+        expect.soft(Math.abs(above - below), `${label}: ${text} above ${above}px, below ${below}px`).toBeLessThanOrEqual(1);
       }
     };
 
@@ -182,11 +209,61 @@ for (const width of [1600, 390]) {
     await html.route("https://fonts.googleapis.com/**", (route) => route.abort());
     await html.setContent(await exported.text());
     await check(html, "main", "export");
+    await html.emulateMedia({ media: "print" });
+    await check(html, "main", "export-print");
 
     await anonymous.close();
     await owner.context.close();
   });
 }
+
+test("tight lists space code after text but not at the start of an item", async ({ browser }) => {
+  const owner = await signIn(browser, "tight-list-code");
+  const page = owner.page;
+  const id = await createDocument(page, TIGHT_LIST_CODE_DOC, "Tight list code");
+  await openDocument(page, id);
+
+  const check = async (target: Page, root: string, label: string) => {
+    const names = ["Plain tight code", "Formatted tight code", "First block", "Task tight code"];
+    const blocks = await target.locator(`${root} li pre`).evaluateAll((elements) =>
+      elements.map((block) => ({
+        text: block.querySelector("code")?.textContent?.trim(),
+        margin: parseFloat(getComputedStyle(block).marginTop),
+        expected: parseFloat(getComputedStyle(block.parentElement!).fontSize) * 0.9,
+      })),
+    );
+    expect(blocks.map(({ text }) => text), `${label}: tight-list fixtures`).toEqual(names);
+    for (const { text, margin, expected } of blocks) {
+      if (text === "First block") expect.soft(margin, `${label}: ${text}`).toBe(0);
+      else expect.soft(Math.abs(margin - expected), `${label}: ${text} margin ${margin}px, expected ${expected}px`).toBeLessThanOrEqual(1);
+    }
+  };
+
+  await check(page, ".md-rich", "editor");
+  const ssr = await browser.newContext({ javaScriptEnabled: false, storageState: await owner.context.storageState() });
+  const placeholder = await ssr.newPage();
+  await placeholder.goto(`/d/${id}`);
+  await check(placeholder, ".rich-placeholder", "placeholder");
+  await ssr.close();
+
+  expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+  const anonymous = await browser.newContext();
+  const reader = await anonymous.newPage();
+  await reader.goto(`/p/${id}`);
+  await check(reader, ".reader-body", "reader");
+
+  const exported = await page.request.get(`/api/documents/${id}/export?format=html`);
+  expect(exported.ok()).toBeTruthy();
+  const html = await anonymous.newPage();
+  await html.route("https://fonts.googleapis.com/**", (route) => route.abort());
+  await html.setContent(await exported.text());
+  await check(html, "main", "export");
+  await html.emulateMedia({ media: "print" });
+  await check(html, "main", "print");
+
+  await anonymous.close();
+  await owner.context.close();
+});
 
 /** The whole rhythm, asserted on one rendered surface. `label` names the surface in failures. */
 function assertRhythm(gaps: Gap[], label: string) {

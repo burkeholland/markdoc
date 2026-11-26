@@ -88,6 +88,7 @@ ul, ol { padding-left: 1.6em; }
 li + li { margin-top: 0.25em; }
 li > p + p, li > ul, li > ol { margin-top: 0.25em; }
 li pre + p { margin-top: var(--md-space); }
+li > pre[data-list-code-after-content] { margin-top: calc(var(--md-space) / 0.9); }
 li.task-list-item { list-style: none; margin-left: -1.6em; padding-left: 1.6em; position: relative; }
 li.task-list-item > input[type="checkbox"] { position: absolute; left: 0; top: 0.35em; margin: 0; width: 1em; height: 1em; accent-color: #0f766e; }
 li.task-list-item:has(> input:checked) { color: #57534e; }

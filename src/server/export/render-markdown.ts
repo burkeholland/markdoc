@@ -112,6 +112,24 @@ function rehypeLabelTaskCheckboxes(): (tree: HastRoot) => void {
   };
 }
 
+/** Tight lists can have text nodes rather than a paragraph before their code block. */
+function rehypeMarkListCode(): (tree: HastRoot) => void {
+  return (tree) => {
+    visitElements(tree, (item) => {
+      if (item.tagName !== "li") return;
+      let hasContent = false;
+      for (const child of item.children) {
+        if (child.type === "text") {
+          hasContent ||= child.value.trim().length > 0;
+        } else if (child.type === "element") {
+          if (child.tagName === "pre" && hasContent) child.properties.dataListCodeAfterContent = "true";
+          if (child.tagName !== "input" || child.properties.type !== "checkbox") hasContent = true;
+        }
+      }
+    });
+  };
+}
+
 /** Collect headings (after rehype-slug has assigned ids) into the sink. */
 function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => void {
   return (tree) => {
@@ -133,6 +151,7 @@ export async function renderMarkdownFragment(markdown: string, { assetBaseUrl, l
   const assetIds: string[] = [];
   const file = await readerHtml({ assetBaseUrl, linkCards, videoPlayback })
     .use(() => rehypeLabelTaskCheckboxes())
+    .use(() => rehypeMarkListCode())
     .use(rehypeSlug)
     .use(() => rehypeCollectHeadings(headings))
     .use(rehypeHighlight)
