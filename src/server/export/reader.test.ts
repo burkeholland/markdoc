@@ -71,8 +71,8 @@ const FIXTURE_BODY = `<h1 id="reader-fixture">Reader Fixture</h1>
 <li class="task-list-item"><input type="checkbox" checked disabled aria-label="done"> done</li>
 <li class="task-list-item"><input type="checkbox" disabled aria-label="todo"> todo</li>
 </ul>`;
-const FIXTURE_SHA256 = "d1adc18cc50aa3078a89e32b5b7d2ad156b46b2a1d127302f4751e2a9b9d4abc";
-const FIXTURE_LENGTH = 5845;
+const FIXTURE_SHA256 = "3f9f6ee2b2920fcabe732d90c0fbdf7c4f36a879a57b99bda799893e4f133097";
+const FIXTURE_LENGTH = 5990;
 
 describe("renderMarkdownBody", () => {
   it("returns h1-h6 headings whose ids match the anchors in the HTML", async () => {
@@ -112,6 +112,29 @@ describe("renderMarkdownBody", () => {
     expect(html).toContain('<input type="checkbox" checked disabled aria-label="Review the draft"> Review <strong>the draft</strong>');
     expect(html).toContain('<input type="checkbox" disabled aria-label="Ask for feedback"> Ask for feedback');
     expect(html).toContain('<input type="checkbox" disabled aria-label="Publish the guide"> Publish the guide');
+  });
+
+  it("distinguishes code after list text from code at the start of an item", async () => {
+    const markdown = [
+      "- **Tight** text:",
+      "  ```text",
+      "  After text",
+      "  ```",
+      "- ```text",
+      "  First block",
+      "  ```",
+      "- [ ] Task text:",
+      "  ```text",
+      "  After task text",
+      "  ```",
+      "",
+    ].join("\n");
+    const { html } = await renderMarkdownBody(markdown, { assetBaseUrl: BASE });
+    const blocks = [...html.matchAll(/<pre\b([^>]*)><code[^>]*>([\s\S]*?)<\/code><\/pre>/g)];
+    expect(blocks.map((block) => block[2].trim())).toEqual(["After text", "First block", "After task text"]);
+    expect(blocks[0][1]).toContain("data-list-code-after-content");
+    expect(blocks[1][1]).not.toContain("data-list-code-after-content");
+    expect(blocks[2][1]).toContain("data-list-code-after-content");
   });
 });
 

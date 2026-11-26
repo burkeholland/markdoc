@@ -707,6 +707,15 @@ body {
 .rich-placeholder.reader-body li pre + p {
   margin-top: var(--md-space);
 }
+/* A code block has a smaller font than its surrounding text; compensate so both gaps match. */
+.reader-body li > pre[data-list-code-after-content] {
+  margin-top: calc(var(--md-space) / 0.85);
+}
+.md-rich li .md-li-content > :not(.ProseMirror-gapcursor, p:has(> br.ProseMirror-trailingBreak:only-child)) + pre,
+.md-rich li .md-li-content > :not(.ProseMirror-gapcursor, p:has(> br.ProseMirror-trailingBreak:only-child)) + .ProseMirror-gapcursor + pre,
+.rich-placeholder.reader-body li > pre[data-list-code-after-content] {
+  margin-top: calc(var(--md-space) / 0.9);
+}
 /* A picture is drawn as a block (Tailwind's preflight: img { display: block }), so words that follow it
    in the same paragraph start on the line right under it, with no space at all (Burke #2348: a picture,
    then "I asked" typed after it). The picture keeps one block space below itself. This is the one
