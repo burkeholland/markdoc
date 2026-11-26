@@ -75,11 +75,26 @@ for (const viewport of viewports) {
         textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
       };
     });
+    const githubText = await page.getByTestId("github-signin").evaluate((button) => {
+      const text = Array.from(button.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim() === "Continue with GitHub");
+      const range = document.createRange();
+      if (text) range.selectNodeContents(text);
+      const rects = text ? Array.from(range.getClientRects()) : [];
+      return {
+        clientHeight: button.clientHeight,
+        scrollHeight: button.scrollHeight,
+        textRects: rects.length,
+        textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
+      };
+    });
 
     expect(submitText.scrollHeight, "submit label does not overflow").toBeLessThanOrEqual(submitText.clientHeight);
     expect(submitText.textRects, "submit label renders in one client rect").toBe(1);
     expect(submitText.textLines, "submit label renders on one line").toBe(1);
     expect(submit.height, "submit height").toBeLessThanOrEqual(44);
+    expect(githubText.scrollHeight, "GitHub label does not overflow").toBeLessThanOrEqual(githubText.clientHeight);
+    expect(githubText.textRects, "GitHub label renders in one client rect").toBe(1);
+    expect(githubText.textLines, "GitHub label renders on one line").toBe(1);
 
     if (viewport.width >= 640) {
       expect(Math.abs(input.y - submit.y), "desktop control top edges").toBeLessThanOrEqual(2);
@@ -100,3 +115,24 @@ for (const viewport of viewports) {
     }
   });
 }
+
+test("GitHub sign-in label stays on one line at 280x600", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 280, height: 600 });
+  await page.goto("/login");
+
+  const label = await page.getByTestId("github-signin").evaluate((button) => {
+    const text = Array.from(button.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim() === "Continue with GitHub");
+    const range = document.createRange();
+    if (text) range.selectNodeContents(text);
+    const rects = text ? Array.from(range.getClientRects()) : [];
+    return {
+      clientHeight: button.clientHeight,
+      scrollHeight: button.scrollHeight,
+      textLines: new Set(rects.map((rect) => Math.round(rect.top))).size,
+    };
+  });
+
+  await page.screenshot({ path: testInfo.outputPath("login-280x600.png"), fullPage: true });
+  expect(label.scrollHeight, "GitHub label does not overflow").toBeLessThanOrEqual(label.clientHeight);
+  expect(label.textLines, "GitHub label renders on one line").toBe(1);
+});
