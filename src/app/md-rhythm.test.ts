@@ -78,6 +78,10 @@ describe.each(SURFACES)("%s vertical rhythm", (surface) => {
     expect(hasRule(`${surface} > * + *`, "margin-top", /^var\(--md-space\)$/)).toBe(true);
   });
 
+  it("keeps paragraph space after a code block inside a list item", () => {
+    expect(hasRule(`${surface} li pre + p`, "margin-top", /^var\(--md-space\)$/)).toBe(true);
+  });
+
   it("tightens the first block after a heading (also h2 + h3)", () => {
     expect(hasRule(`${surface} > :is(h1, h2, h3, h4, h5, h6) + *`, "margin-top", /^var\(--md-space-heading-after\)$/)).toBe(true);
   });
@@ -164,6 +168,14 @@ describe("HTML export mirrors the rhythm", () => {
     const offenders = after.split("\n").filter((l) => /^(p|table|pre|blockquote|ul|ol|hr|img|figure|h[1-6])\b[^{]*\{[^}]*\bmargin: 0\b/.test(l.trim()));
     expect(offenders).toEqual([]);
   });
+
+  it("keeps paragraph space after a code block inside a list item", () => {
+    expect(styles).toContain("li pre + p { margin-top: var(--md-space); }");
+  });
+});
+
+it("the editor placeholder keeps the same space after code blocks in lists", () => {
+  expect(hasRule(".rich-placeholder.reader-body li pre + p", "margin-top", /^var\(--md-space\)$/)).toBe(true);
 });
 
 describe("rhythm guard self-check", () => {

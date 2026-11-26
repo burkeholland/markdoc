@@ -701,6 +701,12 @@ body {
 .reader-body > :first-child {
   margin-top: 0;
 }
+/* List content can sit inside the editor's .md-li-content wrapper or directly inside a reader <li>. */
+.md-rich li pre + p,
+.reader-body li pre + p,
+.rich-placeholder.reader-body li pre + p {
+  margin-top: var(--md-space);
+}
 /* A picture is drawn as a block (Tailwind's preflight: img { display: block }), so words that follow it
    in the same paragraph start on the line right under it, with no space at all (Burke #2348: a picture,
    then "I asked" typed after it). The picture keeps one block space below itself. This is the one

@@ -99,6 +99,95 @@ function pair(gaps: Gap[], prev: string, next: string, nth = 0): Gap {
 const BLOCK = { min: 12, max: 16 };
 const AFTER_HEADING = { min: 6, max: 14 };
 
+const LIST_CODE_DOC = [
+  "# Code block spacing",
+  "",
+  "4. In **Prompt**, paste:",
+  "",
+  "   ```markdown",
+  "   Review the proposed CI fixes.",
+  "   Never merge or change unrelated code.",
+  "   ```",
+  "",
+  "   Replace `@your-team` with the team who should review CI changes.",
+  "",
+  "5. Under **Tools**, select the tools you need.",
+  "",
+  "- A bulleted example:",
+  "",
+  "  ```text",
+  "  Bulleted code",
+  "  ```",
+  "",
+  "  Paragraph after bulleted code.",
+  "",
+  "  - A nested example:",
+  "",
+  "    ```text",
+  "    Nested code",
+  "    ```",
+  "",
+  "    Paragraph after nested code.",
+  "",
+].join("\n");
+
+for (const width of [1600, 390]) {
+  test(`code blocks inside lists leave paragraph space below them (${width}px)`, async ({ browser }, testInfo) => {
+    const owner = await signIn(browser, `list-code-${width}`);
+    const page = owner.page;
+    const id = await createDocument(page, LIST_CODE_DOC, "Code block spacing");
+    await openDocument(page, id);
+    await page.setViewportSize({ width, height: 1000 });
+
+    const check = async (target: Page, root: string, label: string) => {
+      await expect(target.locator(`${root} li pre + p`)).toHaveCount(3);
+      await target.screenshot({ path: testInfo.outputPath(`${label}.png`), fullPage: true });
+      const gaps = await target.locator(`${root} li pre + p`).evaluateAll((paragraphs) =>
+        paragraphs.map((p) => ({
+          text: p.textContent,
+          gap: p.getBoundingClientRect().top - p.previousElementSibling!.getBoundingClientRect().bottom,
+        })),
+      );
+      for (const { text, gap } of gaps) {
+        expect.soft(gap, `${label}: ${text}`).toBeGreaterThanOrEqual(BLOCK.min);
+        expect.soft(gap, `${label}: ${text}`).toBeLessThanOrEqual(BLOCK.max);
+      }
+    };
+
+    await check(page, ".md-rich", "editor-light");
+    await setTheme(page, "dark");
+    await check(page, ".md-rich", "editor-dark");
+
+    const ssr = await browser.newContext({
+      viewport: { width, height: 1000 },
+      javaScriptEnabled: false,
+      storageState: await owner.context.storageState(),
+    });
+    const placeholder = await ssr.newPage();
+    await placeholder.goto(`/d/${id}`);
+    await check(placeholder, ".rich-placeholder", "placeholder");
+    await ssr.close();
+
+    expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+    const anonymous = await browser.newContext({ viewport: { width, height: 1000 } });
+    const reader = await anonymous.newPage();
+    await reader.goto(`/p/${id}`);
+    await check(reader, ".reader-body", "reader-light");
+    await setTheme(reader, "dark");
+    await check(reader, ".reader-body", "reader-dark");
+
+    const exported = await page.request.get(`/api/documents/${id}/export?format=html`);
+    expect(exported.ok()).toBeTruthy();
+    const html = await anonymous.newPage();
+    await html.route("https://fonts.googleapis.com/**", (route) => route.abort());
+    await html.setContent(await exported.text());
+    await check(html, "main", "export");
+
+    await anonymous.close();
+    await owner.context.close();
+  });
+}
+
 /** The whole rhythm, asserted on one rendered surface. `label` names the surface in failures. */
 function assertRhythm(gaps: Gap[], label: string) {
   const within = (g: Gap, { min, max }: { min: number; max: number }, what: string) => {
